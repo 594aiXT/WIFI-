@@ -1,0 +1,37 @@
+# ===== Keil MDK-ARM 构建输出 =====
+# 编译产物目录（axf/hex/map/o/crf/dep/lnp/build_log.htm 等都在这里）
+MDK-ARM/ESP32/
+MDK-ARM/Objects/
+MDK-ARM/Listings/
+MDK-ARM/RTE/_ESP32/
+
+# 零散编译中间文件
+*.o
+*.d
+*.crf
+*.dep
+*.lnp
+*.map
+*.axf
+*.hex
+*.bin
+*.elf
+
+# ===== Keil 用户级配置（换机器不同步）=====
+*.uvguix.*
+JLinkLog.txt
+JLinkSettings.ini
+EventRecorderStub.scvd
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+*~
+*.bak
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== AI 工作目录 =====
+.workbuddy-ai/
