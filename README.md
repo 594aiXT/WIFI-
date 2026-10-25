@@ -2,11 +2,11 @@
 
 基于 STM32F103C8T6 + ESP32（AT 固件）的桌面电子时钟：OLED 显示大字号时间、日期、北京天气与室内温湿度，旋转编码器操作六项图标菜单，断网时靠 DS1302 继续走时。
 
-- 版本：v1.2（大时间首页、六项图标菜单、每日软件闹钟、专注倒计时）
+- 版本：v1.3（图标 GUI、改进编码器消抖、专注暂停可调时）
 - 主控：STM32F103C8T6（Cortex-M3，64KB Flash / 20KB RAM，HSE 8MHz × 9 = 72MHz）
 - 开发环境：STM32CubeMX + Keil MDK（ARMCC V5.06，-O3）+ STM32F1 HAL 库
-- 资源占用：Flash 27.52KB（43%）、RAM 4.41KB（22%）
-- 编译状态：0 Error / 3 Warning（1 处 GBK 多字节告警 + 2 处文件末尾缺换行）
+- 资源占用：Flash 27.78KB（43%）、RAM 4.42KB（22%）
+- 编译状态：0 Error / 4 Warning（4 个均为文件末尾缺换行，无实质问题）
 
 ---
 
@@ -36,7 +36,8 @@
 
 **专注**
 - 未启动时旋转调时长（1~99 分钟，默认 25），短按开始
-- 运行中短按暂停，暂停中短按继续，完成后短按复位
+- 运行中短按暂停；**暂停时旋转仍可调时长**，短按继续；完成后旋转选择新时长或短按复位
+- 运行过程中不接受旋转调时，避免误操作改变剩余时间
 - 计时基于**绝对截止时间**，切换页面、进入菜单都不中断；完成时自动跳到专注页
 
 **时间与联网**
@@ -55,12 +56,12 @@
 | RTC | DS1302 | 3 线 | PA11 CE(RST)、PA8 SCLK、PB4 I/O |
 | 温湿度 | SHT30 | I2C1 @100kHz，地址 0x44 | PB6 SCL、PB7 SDA |
 | WiFi | ESP32（AT 固件） | USART2 @115200 | PA2 TX→ESP RX、PA3 RX←ESP TX |
-| 编码器 | 带按键旋转编码器 | EXTI（上升沿） | PB12 A、PB14 B、PB13 SW |
+| 编码器 | 带按键旋转编码器 | A/B 双边沿 EXTI + 按键轮询 | PB14 A、PB12 B、PB13 SW |
 | 调试 | USB-TTL | USART1 @115200 | PA9 TX、PA10 RX |
 
 **接线要点**
 - ESP32 需烧录 AT 固件（支持 `AT+HTTPCGET`，即 ESP-AT 2.x 以上），供电能力要够（峰值 500mA，建议独立 3.3V LDO 并共地）
-- 编码器 A/B/SW 三个引脚在代码中配置为**无上下拉**，依赖模块自带上拉电阻；若用裸编码器需外接 10kΩ 上拉到 3.3V，否则读数乱跳
+- 编码器 A/B/SW 三个引脚使用 STM32 **内部上拉**，按下或接地时读为低电平；若模块已有外部上拉可并联使用。A/B 使用双边沿正交解码，按键使用 30ms 稳定窗口
 - DS1302 的 I/O 是准双向口，驱动内部会在读之前切换输入/输出方向，无需外部上拉
 - PA6（SPI1_MISO）已配置但本设计不用，OLED 是单向写
 - PB4 复位后默认是 JTAG 的 NJTRST，驱动里已开 AFIO 时钟做重映射，仿真器需设为 SWD 模式
@@ -187,6 +188,28 @@ if (Due(s_nextSht)) { Sht_Update(); s_nextSht = HAL_GetTick() + SHT_PERIOD_MS; }
 - 页面切换、联网阻塞都不会丢时间
 - 暂停时把「剩余秒数」冻结到 `s_focusRemaining`，继续时重新算截止时间
 
+时长调整（`Focus_Adjust()`）：运行中不接受旋转；未开始或已完成时旋转会把状态重置为 IDLE 并套用新时长；暂停时只更新剩余时间、保持暂停。上下限 1~99 分钟，到边界后钳位不再回绕。
+
+### 4.8 编码器输入（v1.3 重做）
+
+机械编码器的两个核心问题是**旋转抖动被当成按键**、**主循环慢导致消抖失效**。v1.3 从三处解决：
+
+**① 旋转：完整正交解码**
+A/B 改为**双边沿** EXTI，用 16 项状态表（`Encoder_Transition[前一状态<<2 | 当前状态]`）判断方向。每 4 个合法边沿算 1 档（`ENCODER_STEPS_PER_DETENT`），`Encoder_Get()` 只取整档，把不足一档的余量加回 `SubSteps`，慢速旋转不丢步。抖动产生的往返边沿在状态表里互相抵消，不产生净计数。
+
+**② 按键：30ms 稳定窗口 + 1ms 节拍**
+按键不再用 EXTI，改为在 `SysTick_Handler` 里每 1ms 采样一次（`Encoder_Tick1ms()`）。电平必须与当前稳定状态不同且连续保持 30ms 才认账，中途回到原电平就重新计时。松手才产生 `CONFIRM`，按住 700ms 产生 `BACK`。
+放在 SysTick 而不是主循环，是因为主循环会被 ESP-AT 忙等阻塞最长 60 秒——那时轮询消抖完全失效。
+
+**③ 旋转/按键互锁（本次关键修复）**
+- A/B 任意边沿（含抖动）都刷新 `last_rotate_tick`
+- 其后 150ms 内（`ENCODER_ROTATE_GUARD_MS`）按键一律视为松开
+- 若按下过程中发生旋转，本次按键标记 `press_aborted`：松手不产生短按，也不会触发长按
+
+这解决的现象是：转动编码器时偶尔会误进菜单、或刚进专注页就被"短按"开始计时，导致时长调不动。
+
+> 兼容：`Encoder_ButtonTask()` 保留。若未接入 1ms 节拍，它会按经过的毫秒数补采样（主循环慢时效果变差），功能不会丢。
+
 ---
 
 ## 5. OLED 显示布局与图标
@@ -232,7 +255,9 @@ if (Due(s_nextSht)) { Sht_Update(); s_nextSht = HAL_GetTick() + SHT_PERIOD_MS; }
 | `app/ui_app.c` | `ALARM_CATCHUP_MIN` | 5 | 漏检补响的最大跨度（分钟） |
 | `app/ui_app.c` | `FOCUS_DEFAULT_MIN` | 25 | 专注默认时长 |
 | `app/ui_app.c` | `FOCUS_MIN/MAX_MINUTES` | 1 / 99 | 专注时长上下限 |
-| `interface/encoder.c` | `ENCODER_DEBOUNCE_MS` | 20 | 按键消抖时间 |
+| `interface/encoder.c` | `ENCODER_DEBOUNCE_MS` | 30 | 按键稳定窗口 |
+| `interface/encoder.c` | `ENCODER_STEPS_PER_DETENT` | 4 | 每个机械档位的正交边沿数 |
+| `interface/encoder.c` | `ENCODER_ROTATE_GUARD_MS` | 150 | 旋转后忽略按键的互锁时间 |
 | `interface/encoder.c` | `ENCODER_LONG_MS` | 700 | 长按判定时间 |
 | `interface/oled.h` | `OLED_USE_SH1106` | 1 | 1=SH1106(1.3")，0=SSD1306(0.96") |
 | `interface/esp32.c` | `ESP32_GetWeather()` 内 URL | 北京 | 天气经纬度 |
@@ -248,7 +273,7 @@ if (Due(s_nextSht)) { Sht_Update(); s_nextSht = HAL_GetTick() + SHT_PERIOD_MS; }
 3. 仿真器设 **SWD** 模式（PB4 被 DS1302 占用，JTAG 不可用），`F8` 下载
 4. 串口助手接 PA9/PA10，**115200 8N1**，可看到启动流程和 AT 交互日志（`printf` 已重定向到 USART1）
 
-当前编译结果：`Code=23000  RO-data=4564  RW-data=620  ZI-data=3900`，即 ROM 27.52KB / RAM 4.41KB。3 个警告均为无害项：1 个来自 GBK 源文件的多字节字符告警，2 个是文件末尾缺换行。
+当前编译结果：`Code=23240  RO-data=4580  RW-data=628  ZI-data=3900`，即 ROM 27.78KB / RAM 4.42KB。4 个警告全部是 `last line of file ends without a newline`，本次来自 `encoder.c` / `encoder.h`；`ds1302.c/h`、`esp32.c` 也有同样问题，全量编译时会出现更多同类警告，给文件末尾补一个换行即可消除。
 
 改外设配置请用 CubeMX 打开 `ESP32.ioc` 重新生成，**只改 `USER CODE BEGIN/END` 之间**的内容，否则重新生成会被覆盖。
 
@@ -299,12 +324,15 @@ ESP32/
 公开仓库前必须处理：把 SSID/密码抽到 `app/net_config.h`（加入 `.gitignore`），仓库里只留 `net_config.example.h` 模板，再用 `git filter-repo` 清理历史。当前仓库只适合本地或私有远端。
 
 **④ 部分源文件仍是 GBK 编码**
-`interface/encoder.c`、`interface/encoder.h`、`interface/oledfont.h` 是 GBK，其余均为 UTF-8。VS Code 打开会乱码，且编译时产生 1 个 `invalid multibyte character sequence` 警告。建议统一转 UTF-8，并在 Keil 里设 `Edit → Configuration → Encoding = UTF-8`。
+`interface/oledfont.h` 仍是 GBK，其余主要源码已统一为 UTF-8。建议将剩余字库转为 UTF-8，并在 Keil 里设 `Edit → Configuration → Encoding = UTF-8`。
 
-**⑤ 显存仍整帧提交**
+**⑤ `Encoder_Tick1ms()` 的调用位置在 USER CODE 块之外**
+`Core/Src/stm32f1xx_it.c` 里这行是直接加在 `HAL_IncTick();` 之后的，不在 `USER CODE BEGIN/END SysTick_IRQn` 区间内。**下次用 CubeMX 重新生成代码时会被删掉**。届时编码器自动退回主循环轮询（功能不丢，但联网阻塞期间消抖失效）。建议把它移到 `USER CODE BEGIN SysTick_IRQn 1` 里。
+
+**⑥ 显存仍整帧提交**
 一帧只传一次 1KB GRAM，无变化不传输，已经够用。若后续要压帧率或降功耗，可再做脏区域局部刷新。
 
-**⑥ 其他**
+**⑦ 其他**
 - 闹钟只有屏幕提示，**没有声音**——原理图未分配蜂鸣器引脚。这让闹钟实用性有限，是硬件层面的待办
 - 闹钟设置、专注时长都只存在 RAM，掉电丢失；页面位置也不保存
 - 无 DS1302 备用电池电压检测，电池耗尽后只能靠联网校时
@@ -322,3 +350,4 @@ ESP32/
 | v1.1 | 未单独提交 | 扩展六页 GUI，新增每日软件闹钟、全屏提醒和可后台运行的专注倒计时 |
 | v1.2 | `4efd612` | 大时间首页、六项表驱动图标菜单、动态状态图标、任意坐标位图与统一显存提交（v1.1 改动一并提交） |
 | 文档 | 本次提交 | README 同步至 v1.2 实际实现，补充布局坐标、状态机规则与资源占用 |
+| v1.3 | `fad907b` | 编码器改为完整正交解码 + 1ms 节拍消抖 + 旋转互锁；专注暂停时可旋转调时 |
