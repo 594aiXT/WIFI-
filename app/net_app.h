@@ -27,6 +27,7 @@ void NetApp_Process(void);
 /* 读取当前数据（供其他模块，如写入 DS1302 使用） */
 int  NetApp_GetTime(BJTime_t *t);        /* 0=有效 */
 int  NetApp_GetWeather(Weather_t *w);    /* 0=有效 */
+const char *NetApp_GetWeatherText(void); /* 天气状况文字，无数据时为 "--" */
 
 /* 联网状态（供状态页显示） */
 typedef struct

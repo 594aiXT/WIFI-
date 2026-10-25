@@ -763,6 +763,11 @@
               <FileType>1</FileType>
               <FilePath>..\app\ui_app.c</FilePath>
             </File>
+            <File>
+              <FileName>ui_assets.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\ui_assets.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

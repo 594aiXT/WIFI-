@@ -1,12 +1,11 @@
-
 #ifndef __OLED_H
 #define __OLED_H
 
 #include "stm32f1xx_hal.h"
 #include <stdint.h>
 
-/* Ä¬ÈÏ°´³£¼ûµÄ 1.3 ´ç SH1106 OLED ÅäÖÃ¡£
-   Èç¹ûÄãµÄÆÁÄ»È·ÈÏÊÇ SSD1306£¬½«Æä¸ÄÎª 0¡£ */
+/* 1.3 å¯¸ SH1106ï¼šå†…éƒ¨ GDDRAM ä¸º 132 åˆ—ï¼Œæ¨¡ç»„å¯è§åŒºåŸŸä¸º 128 åˆ—ã€‚
+ * è‹¥å®é™…æ§åˆ¶å™¨ä¸º SSD1306ï¼Œå°† OLED_USE_SH1106 æ”¹ä¸º 0ã€‚ */
 #ifndef OLED_USE_SH1106
 #define OLED_USE_SH1106    1
 #endif
@@ -15,40 +14,42 @@
 #define OLED_HEIGHT        64
 #define OLED_PAGES         8
 
-/* 16x16 µãÕóÓ¢ÎÄ×ÖÌå£»±£ÁôÔ­¹¤³ÌµÄ×ÖÌå½Ó¿Ú */
-#define SIZE               16
+#define SIZE               16       /* å…¼å®¹æ—§æ–‡å­—æ¥å£ï¼š8x16 ASCII */
 
 #define OLED_CMD           0
 #define OLED_DATA          1
 
-/* µÍ²ã½Ó¿Ú */
-void OLED_WR_Byte(uint8_t dat, uint8_t cmd);
-void OLED_Set_Pos(uint8_t x, uint8_t y);
+HAL_StatusTypeDef OLED_WR_Byte(uint8_t dat, uint8_t cmd);
+HAL_StatusTypeDef OLED_Set_Pos(uint8_t x, uint8_t y);
+
+/* æ‰€æœ‰ç»˜å›¾å‡½æ•°åªå†™ GRAMï¼›ç”±ä¸»å¾ªç¯æˆ–å¯åŠ¨æµç¨‹è°ƒç”¨æœ¬å‡½æ•°ç»Ÿä¸€æäº¤ã€‚
+ * æ— æ˜¾å­˜å˜åŒ–æ—¶ä¸è¿›è¡Œ SPI ä¼ è¾“ã€‚ */
 void OLED_Refresh_Gram(void);
 
-/* OLED ¿ØÖÆ½Ó¿Ú */
 void OLED_Init(void);
 void OLED_Display_On(void);
 void OLED_Display_Off(void);
 void OLED_Clear(void);
 
-/* »æÍ¼½Ó¿Ú
-   DrawPoint ºÍ Fill Ê¹ÓÃÏñËØ×ø±ê£ºx=0~127£¬y=0~63¡£
-   ShowChar¡¢ShowString¡¢ShowNum¡¢ShowCHinese ±£Áô¾É½Ó¿ÚµÄÒ³×ø±ê£º
-   y=0 ±íÊ¾µÚ 0 Ò³£¬Ã¿Ò³¸ß 8 ÏñËØ£»16 ¸ß×ÖÌåÕ¼ÓÃ y ºÍ y+1 Á½Ò³¡£ */
+/* ç‚¹ä¸çŸ©å½¢ä½¿ç”¨åƒç´ åæ ‡ï¼›æ—§æ–‡å­—æ¥å£çš„ y ä½¿ç”¨é¡µåæ ‡ã€‚ */
 void OLED_DrawPoint(uint8_t x, uint8_t y, uint8_t t);
 void OLED_Fill(uint8_t x1, uint8_t y1,
                uint8_t x2, uint8_t y2, uint8_t dot);
-
 void OLED_ShowChar(uint8_t x, uint8_t y, uint8_t chr);
 void OLED_ShowNum(uint8_t x, uint8_t y,
                   uint32_t num, uint8_t len, uint8_t size);
 void OLED_ShowString(uint8_t x, uint8_t y, const char *p);
 void OLED_ShowCHinese(uint8_t x, uint8_t y, uint8_t no);
 
-/* Í¼Æ¬Êı¾İÊ¹ÓÃÔ­´úÂëµÄÒ³¸ñÊ½£»
-   x1 ÊÇ½áÊøÁĞ£¬y1 ÊÇ½áÊøÒ³£¬¾ù²»°üº¬ÔÚ»æÖÆ·¶Î§ÄÚ¡£ */
+/* å…¼å®¹æ—§é¡µå¯¹é½ BMP æ¥å£ã€‚ */
 void OLED_DrawBMP(uint8_t x0, uint8_t y0,
                   uint8_t x1, uint8_t y1, const uint8_t BMP[]);
+
+/* æ–°å›¾æ ‡æ¥å£ï¼šåƒç´ åæ ‡ï¼Œæ”¯æŒä»»æ„é«˜åº¦å’Œè¾¹ç•Œè£å‰ªã€‚
+ * ä½å›¾æ ¼å¼ä¸ºåˆ—ä¼˜å…ˆã€å‚ç›´å­—èŠ‚ã€bit0 åœ¨ä¸Šã€1 ä¸ºç‚¹äº®ã€‚ */
+void OLED_DrawBitmap(int16_t x, int16_t y,
+                     uint8_t width, uint8_t height,
+                     const uint8_t *bitmap);
+void OLED_InvertRect(uint8_t x, uint8_t y, uint8_t width, uint8_t height);
 
 #endif

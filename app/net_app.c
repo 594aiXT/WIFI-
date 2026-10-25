@@ -1,5 +1,6 @@
 #include "net_app.h"
 #include "oled.h"
+#include "ui_assets.h"
 #include "ds1302.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,20 +32,25 @@ static int Due(uint32_t deadline)
     return (int32_t)(HAL_GetTick() - deadline) >= 0;
 }
 
-/* OLED 一行 16 个字符（8x16 字体，行号 0~3），不足补空格以覆盖旧内容 */
-static void ShowRow(uint8_t row, const char *s)
+/* OLED 文本行（8x16 字体，行号 0~3），不足补空格以覆盖旧内容。 */
+static void ShowRowN(uint8_t row, uint8_t width, const char *s)
 {
     char line[17];
-    snprintf(line, sizeof(line), "%-16s", s);
+    if (width > 16U) width = 16U;
+    snprintf(line, sizeof(line), "%-*.*s", (int)width, (int)width, s);
     OLED_ShowString(0, (uint8_t)(row * 2), line);
+}
+
+static void ShowRow(uint8_t row, const char *s)
+{
+    ShowRowN(row, 16U, s);
 }
 
 static void SetWifiState(uint8_t ok)
 {
     if (s_wifiOK != ok)
     {
-        s_wifiOK = ok;
-        s_dateDirty = 1;                /* 日期行末尾的联网标记需要刷新 */
+        s_wifiOK = ok;                  /* 首页 WiFi 图标由 UI 轮询状态后更新 */
     }
 }
 
@@ -116,59 +122,75 @@ static void Rtc_Refresh(void)
 static void Draw_Date(void)
 {
     char buf[24];
-    if (!s_display) return;                     /* 不在本页：保留脏标记，回到本页时统一重绘 */
-    char link = s_wifiOK ? 'W' : 'x';           /* W=已联网  x=离线（仅用 DS1302 走时） */
+    if (!s_display) return;
 
+    /* 左侧 14 字符属于 net_app，右侧 16 像素预留给 UI 状态图标。 */
     if (s_timeValid)
-        snprintf(buf, sizeof(buf), "%04u-%02u-%02u %s %c",
+        snprintf(buf, sizeof(buf), "%04u-%02u-%02u %s",
                  s_time.year, s_time.month, s_time.day,
-                 s_wdayName[s_time.wday % 7], link);
+                 s_wdayName[s_time.wday % 7]);
     else
-        snprintf(buf, sizeof(buf), "----/--/--      %c", link);
-    ShowRow(0, buf);
+        snprintf(buf, sizeof(buf), "----/--/-- ---");
+    ShowRowN(0, 14U, buf);
     s_dateDirty = 0;
 }
 
 static void Draw_Time(void)
 {
-    char buf[24];
+    char buf[8];
+    uint8_t digits[5];
+    uint8_t i;
+
     if (!s_display) return;
+    OLED_Fill(0, 16, 111, 47, 0);
     if (s_timeValid)
-        snprintf(buf, sizeof(buf), "%02u:%02u:%02u", s_time.hour, s_time.min, s_time.sec);
+    {
+        digits[0] = (uint8_t)(s_time.hour / 10U);
+        digits[1] = (uint8_t)(s_time.hour % 10U);
+        digits[2] = 10U;                       /* 冒号 */
+        digits[3] = (uint8_t)(s_time.min / 10U);
+        digits[4] = (uint8_t)(s_time.min % 10U);
+        for (i = 0; i < 5U; i++)
+        {
+            OLED_DrawBitmap((int16_t)(4 + i * 16), 16, 16, 32,
+                            ui_font_digits_16x32[digits[i]]);
+        }
+        snprintf(buf, sizeof(buf), "%02u", s_time.sec);
+        OLED_ShowString(96, 4, buf);            /* 秒放在大时间右侧 */
+    }
     else
-        snprintf(buf, sizeof(buf), "--:--:--");
-    ShowRow(1, buf);
+    {
+        OLED_ShowString(16, 4, "--:--:--");
+    }
 }
 
 static void Draw_Weather(void)
 {
     char buf[24];
-    if (!s_display) return;
+    char humi[8];
+    int t10;
+    char sign;
 
+    if (!s_display) return;
     if (!s_weatherValid)
     {
-        ShowRow(2, "Beijing: --");
-        ShowRow(3, "--.-C H--% W--");
+        ShowRowN(3, 14U, "--.-C H-- W--");
         s_weatherDirty = 0;
         return;
     }
 
-    snprintf(buf, sizeof(buf), "Beijing %s", Weather_CodeToStr(s_weather.code));
-    ShowRow(2, buf);
-
-    int t10 = s_weather.temp10;
-    char sign = (t10 < 0) ? '-' : ' ';
+    t10 = s_weather.temp10;
+    sign = (t10 < 0) ? '-' : ' ';
     if (t10 < 0) t10 = -t10;
-
-    char humi[8];
     if (s_weather.humi10 >= 0)
-        snprintf(humi, sizeof(humi), "%d%%", s_weather.humi10 / 10);
+        snprintf(humi, sizeof(humi), "%d", s_weather.humi10 / 10);
     else
         snprintf(humi, sizeof(humi), "--");
 
+    /* 首页底部仅保留关键天气参数，完整天气状况在时钟详情页显示。 */
     snprintf(buf, sizeof(buf), "%c%d.%dC H%s W%d",
              sign, t10 / 10, t10 % 10, humi, s_weather.wind10 / 10);
-    ShowRow(3, buf);
+    ShowRowN(3, 14U, buf);
     s_weatherDirty = 0;
 }
 
@@ -248,11 +270,13 @@ int NetApp_Init(void)
     /* 先显示一次 DS1302 的时间（离线可用），再开始联网 */
     Draw_Date();
     Draw_Time();
+    OLED_Refresh_Gram();
     HAL_Delay(800);
     OLED_Clear();
 
     /* 1. ESP32 */
     ShowRow(0, "ESP32  : ...");
+    OLED_Refresh_Gram();
     if (ESP32_Init() != 0)
     {
         ShowRow(0, "ESP32  : FAIL");
@@ -265,6 +289,7 @@ int NetApp_Init(void)
 
     /* 2. WiFi */
     ShowRow(1, "WiFi   : ...");
+    OLED_Refresh_Gram();
     if (ConnectWiFi() != 0)
     {
         ShowRow(1, "WiFi   : FAIL");
@@ -277,6 +302,7 @@ int NetApp_Init(void)
 
     /* 3. 时间 */
     ShowRow(2, "Time   : ...");
+    OLED_Refresh_Gram();
     if (DoSyncTime() == 0)
     {
         ShowRow(2, "Time   : OK");
@@ -290,6 +316,7 @@ int NetApp_Init(void)
 
     /* 4. 天气 */
     ShowRow(3, "Weather: ...");
+    OLED_Refresh_Gram();
     if (DoWeather() == 0)
     {
         ShowRow(3, "Weather: OK");
@@ -301,18 +328,22 @@ int NetApp_Init(void)
         s_nextWeather = HAL_GetTick() + NET_RETRY_MS;
     }
 
+    OLED_Refresh_Gram();
     HAL_Delay(1000);                    /* 让用户看清结果 */
     OLED_Clear();
     Rtc_Refresh();
     Draw_All();
+    OLED_Refresh_Gram();
     return (s_timeValid && s_weatherValid) ? 0 : -3;
 
 offline:
     /* 联网失败：直接用 DS1302 的时间继续显示，后台定时重连 */
+    OLED_Refresh_Gram();
     HAL_Delay(1500);
     OLED_Clear();
     Rtc_Refresh();
     Draw_All();
+    OLED_Refresh_Gram();
     return -1;
 }
 
@@ -385,6 +416,11 @@ int NetApp_GetWeather(Weather_t *w)
     if (!s_weatherValid || w == NULL) return -1;
     *w = s_weather;
     return 0;
+}
+
+const char *NetApp_GetWeatherText(void)
+{
+    return s_weatherValid ? Weather_CodeToStr(s_weather.code) : "--";
 }
 
 /* 页面切换时由 UI 层调用：on=1 表示回到时间天气页并整页重绘（调用前请先清屏） */
