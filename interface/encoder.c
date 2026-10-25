@@ -1,37 +1,55 @@
 #include "encoder.h"
 
-/* ±àÂëÆ÷Òı½Å£º±Ü¿ª OLED¡¢DS1302¡¢USART2 ºÍ I2C1
- * A Ïà = PB14£¬B Ïà = PB12£¬°´¼ü = PB13
- * PB12¡¢PB14 ¶¼ÊôÓÚ EXTI15_10 ÖĞ¶ÏÏß£¨¹²ÓÃÒ»¸öÖĞ¶ÏÈë¿Ú£©*/
-#define ENCODER_A_PORT       GPIOB
-#define ENCODER_A_PIN        GPIO_PIN_14
+/* A ç›¸ PB14ï¼ŒB ç›¸ PB12ï¼ŒæŒ‰é”® PB13ã€‚ */
+#define ENCODER_A_PORT        GPIOB
+#define ENCODER_A_PIN         GPIO_PIN_14
+#define ENCODER_B_PORT        GPIOB
+#define ENCODER_B_PIN         GPIO_PIN_12
+#define ENCODER_SW_PORT       GPIOB
+#define ENCODER_SW_PIN        GPIO_PIN_13
 
-#define ENCODER_B_PORT       GPIOB
-#define ENCODER_B_PIN        GPIO_PIN_12
+#define ENCODER_DEBOUNCE_MS   30U     /* æŒ‰é”®å¿…é¡»è¿ç»­ 30ms ç¨³å®šæ‰ç®—æœ‰æ•ˆ         */
+#define ENCODER_LONG_MS       700U
+#define ENCODER_ROTATE_GUARD_MS 150U  /* æ—‹è½¬å 150ms å†…å¿½ç•¥æŒ‰é”®ï¼ˆæŠ‘åˆ¶æ—‹è½¬ä¸²æ‰°ï¼‰ */
+#define ENCODER_STEPS_PER_DETENT 4
 
-#define ENCODER_SW_PORT      GPIOB
-#define ENCODER_SW_PIN       GPIO_PIN_13
+/* æ­£äº¤è§£ç å™¨ä»¥å››åˆ†ä¹‹ä¸€æ¡£ä½ç´¯è®¡ï¼Œæ»¡ 4 ä¸ªåˆæ³•è¾¹æ²¿è¾“å‡ºä¸€æ¡£ã€‚ */
+static volatile int16_t Encoder_SubSteps = 0;
+static volatile uint8_t Encoder_LastAB = 0;
 
-#define ENCODER_DEBOUNCE_MS  20U
-#define ENCODER_LONG_MS      700U
-
-/* Ğı×ª¼ÆÊı£ºÖĞ¶ÏÖĞĞŞ¸Ä£¬Ö÷Ñ­»·ÖĞ¶ÁÈ¡ */
-static volatile int16_t Encoder_Count = 0;
-
-/* °´¼ü×´Ì¬ */
-static GPIO_PinState button_raw_last;
-static GPIO_PinState button_stable;
-static uint32_t button_change_tick;
+/* æŒ‰é”®çŠ¶æ€æœºï¼šç”± 1ms èŠ‚æ‹é©±åŠ¨ï¼ˆè§ Encoder_Tick1msï¼‰ï¼Œä¸ä¸»å¾ªç¯å¿«æ…¢æ— å…³ */
+static uint8_t  button_pressed = 0;       /* æ¶ˆæŠ–åçš„ç¨³å®šçŠ¶æ€ï¼š1=æŒ‰ä¸‹ */
+static uint8_t  button_count = 0;         /* ä¸ç¨³å®šçŠ¶æ€ä¸åŒçš„è¿ç»­æ¯«ç§’æ•° */
 static uint32_t button_press_tick;
-static uint8_t long_press_sent;
+static uint8_t  long_press_sent;
+static uint8_t  press_aborted;            /* æŒ‰ä¸‹æœŸé—´å‘ç”Ÿæ—‹è½¬ï¼šæœ¬æ¬¡æŒ‰é”®ä½œåºŸ */
+static volatile uint8_t tick_hooked = 0;  /* 1ms èŠ‚æ‹å·²æ¥å…¥ SysTick */
+static volatile uint8_t enc_ready = 0;    /* Encoder_Init å®Œæˆåæ‰å…è®¸é‡‡æ ·ï¼ˆSysTick åœ¨æ­¤ä¹‹å‰å°±å·²è¿è¡Œï¼‰ */
 
-static volatile EncoderButtonEvent button_event =
-    ENCODER_BUTTON_NONE;
+/* æœ€è¿‘ä¸€æ¬¡ A/B è¾¹æ²¿çš„æ—¶åˆ»ï¼šæ—‹è½¬è§¦ç‚¹æŠ–åŠ¨å¯èƒ½ä¸²æ‰°åˆ°æŒ‰é”®è„š */
+static volatile uint32_t last_rotate_tick = 0;
 
+static volatile EncoderButtonEvent button_event = ENCODER_BUTTON_NONE;
 
-/**
- * @brief Ğı×ª±àÂëÆ÷³õÊ¼»¯
- */
+/* å®Œæ•´æ­£äº¤çŠ¶æ€è¡¨ï¼šç´¢å¼• = å‰ä¸€çŠ¶æ€ << 2 | å½“å‰çŠ¶æ€ã€‚
+ * çŠ¶æ€ç¼–ç  A<<1 | Bï¼›ç¬¦å·ä¿æŒåŸé©±åŠ¨çš„æ—‹è½¬æ–¹å‘ã€‚ */
+static const int8_t Encoder_Transition[16] =
+{
+     0, -1,  1,  0,
+     1,  0,  0, -1,
+    -1,  0,  0,  1,
+     0,  1, -1,  0
+};
+
+static uint8_t Encoder_ReadAB(void)
+{
+    uint8_t a = (HAL_GPIO_ReadPin(ENCODER_A_PORT, ENCODER_A_PIN) ==
+                 GPIO_PIN_SET) ? 1U : 0U;
+    uint8_t b = (HAL_GPIO_ReadPin(ENCODER_B_PORT, ENCODER_B_PIN) ==
+                 GPIO_PIN_SET) ? 1U : 0U;
+    return (uint8_t)((a << 1) | b);
+}
+
 void Encoder_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -39,174 +57,161 @@ void Encoder_Init(void)
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_AFIO_CLK_ENABLE();
 
-    /*
-     * PB14¡¢PB12£º±àÂëÆ÷ A/B Ïà
-     * ÏÂ½µÑØ´¥·¢£¬ÖĞ¶ÏÄ£Ê½£¬ÄÚ²¿ÉÏÀ­
-     */
-    GPIO_InitStruct.Pin =
-        ENCODER_A_PIN | ENCODER_B_PIN;
-    GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+    /* A/B åŒè¾¹æ²¿ä¸­æ–­ã€‚æœºæ¢°æŠ–åŠ¨äº§ç”Ÿçš„å¾€è¿”è¾¹æ²¿ä¼šåœ¨çŠ¶æ€è¡¨ä¸­ç›¸äº’æŠµæ¶ˆã€‚ */
+    GPIO_InitStruct.Pin = ENCODER_A_PIN | ENCODER_B_PIN;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    /*
-     * PB13£º±àÂëÆ÷°´¼ü£¨ÆÕÍ¨ÊäÈë£¬ÓÉÖ÷Ñ­»·Ïû¶¶ÂÖÑ¯£¬²»Ê¹ÓÃÖĞ¶Ï£©
-     * °´ÏÂ½ÓµØ£¬Òò´Ë°´ÏÂÊ±Îª GPIO_PIN_RESET
-     */
+    /* æŒ‰é”®ä½¿ç”¨è½®è¯¢å’Œ 30ms ç¨³å®šçª—å£ï¼Œä¸ä½¿ç”¨ EXTIã€‚ */
     GPIO_InitStruct.Pin = ENCODER_SW_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(ENCODER_SW_PORT, &GPIO_InitStruct);
 
-    Encoder_Count = 0;
+    /* CubeMX æ›¾æŠŠ PB13 ä¹Ÿé…æˆ EXTIï¼Œè¿™é‡Œæ˜¾å¼å…³é—­è¯¥çº¿ï¼Œé¿å…æ— æ„ä¹‰ä¸­æ–­ã€‚ */
+    EXTI->IMR &= ~((uint32_t)ENCODER_SW_PIN);
+    EXTI->EMR &= ~((uint32_t)ENCODER_SW_PIN);
+    EXTI->RTSR &= ~((uint32_t)ENCODER_SW_PIN);
+    EXTI->FTSR &= ~((uint32_t)ENCODER_SW_PIN);
+    __HAL_GPIO_EXTI_CLEAR_IT(ENCODER_SW_PIN);
 
-    button_raw_last =
-        HAL_GPIO_ReadPin(ENCODER_SW_PORT, ENCODER_SW_PIN);
-    button_stable = button_raw_last;
-    button_change_tick = HAL_GetTick();
+    Encoder_SubSteps = 0;
+    Encoder_LastAB = Encoder_ReadAB();
+
+    button_pressed = 0;
+    button_count = 0;
     button_press_tick = HAL_GetTick();
     long_press_sent = 0;
+    press_aborted = 0;
+    last_rotate_tick = HAL_GetTick() - ENCODER_ROTATE_GUARD_MS;   /* ä¸Šç”µæ—¶å°é”æœªç”Ÿæ•ˆ */
     button_event = ENCODER_BUTTON_NONE;
 
-    /* Çå³ı¿ÉÄÜÒÅÁôµÄ EXTI ±êÖ¾ */
     __HAL_GPIO_EXTI_CLEAR_IT(ENCODER_A_PIN);
     __HAL_GPIO_EXTI_CLEAR_IT(ENCODER_B_PIN);
 
-    /* PB12¡¢PB14 ¹²ÓÃ EXTI15_10 ÖĞ¶Ï */
     HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+    enc_ready = 1;
 }
 
-
-/**
- * @brief »ñÈ¡Ğı×ªÔöÁ¿
- * @return ÕıÊı»ò¸ºÊı±íÊ¾Ğı×ª·½Ïò£¬0 ±íÊ¾Ã»ÓĞĞÂ¼ÆÊı
- *
- * ºÍÔ­±ê×¼ÍâÉè¿â°æ±¾Ò»Ñù£¬¶ÁÈ¡ºó½«¼ÆÊıÇåÁã¡£
- */
 int16_t Encoder_Get(void)
 {
-    int16_t temp;
+    int16_t raw;
+    int16_t detents;
     uint32_t primask;
 
-    /*
-     * ¶ÁÈ¡²¢ÇåÁãÊÇÒ»¸öÕûÌå£¬·ÀÖ¹²Ù×÷ÆÚ¼äÖĞ¶ÏĞŞ¸Ä¼ÆÊı¡£
-     * Í¬Ê±»Ö¸´µ÷ÓÃÇ°µÄÖĞ¶ÏÊ¹ÄÜ×´Ì¬¡£
-     */
     primask = __get_PRIMASK();
     __disable_irq();
+    raw = Encoder_SubSteps;
+    Encoder_SubSteps = 0;
+    if (primask == 0U) __enable_irq();
 
-    temp = Encoder_Count;
-    Encoder_Count = 0;
+    detents = (int16_t)(raw / ENCODER_STEPS_PER_DETENT);
 
-    if (primask == 0U)
-    {
-        __enable_irq();
-    }
+    /* ä¿ç•™ä¸è¶³ä¸€æ¡£çš„ä½™é‡ï¼Œé¿å…æ…¢é€Ÿæ—‹è½¬æ—¶ä¸¢æ­¥ã€‚ */
+    primask = __get_PRIMASK();
+    __disable_irq();
+    Encoder_SubSteps += (int16_t)(raw % ENCODER_STEPS_PER_DETENT);
+    if (primask == 0U) __enable_irq();
 
-    return temp;
+    return detents;
 }
 
-
-/**
- * @brief HAL Íâ²¿ÖĞ¶Ï»Øµ÷
- *
- * PB14£ºA ÏàÏÂ½µÑØ
- * PB12£ºB ÏàÏÂ½µÑØ
- */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-    /* A ÏàÏÂ½µÑØ */
-    if (GPIO_Pin == ENCODER_A_PIN)
+    uint8_t current;
+    uint8_t index;
+
+    if (GPIO_Pin != ENCODER_A_PIN && GPIO_Pin != ENCODER_B_PIN)
     {
-        if (HAL_GPIO_ReadPin(ENCODER_A_PORT,
-                             ENCODER_A_PIN) == GPIO_PIN_RESET)
-        {
-            if (HAL_GPIO_ReadPin(ENCODER_B_PORT,
-                                 ENCODER_B_PIN) == GPIO_PIN_RESET)
-            {
-                Encoder_Count--;
-            }
-        }
+        return;
     }
 
-    /* B ÏàÏÂ½µÑØ */
-    else if (GPIO_Pin == ENCODER_B_PIN)
-    {
-        if (HAL_GPIO_ReadPin(ENCODER_B_PORT,
-                             ENCODER_B_PIN) == GPIO_PIN_RESET)
-        {
-            if (HAL_GPIO_ReadPin(ENCODER_A_PORT,
-                                 ENCODER_A_PIN) == GPIO_PIN_RESET)
-            {
-                Encoder_Count++;
-            }
-        }
-    }
+    last_rotate_tick = HAL_GetTick();       /* ä»»ä½• A/B è¾¹æ²¿ï¼ˆå«æŠ–åŠ¨ï¼‰éƒ½è§†ä¸ºæ­£åœ¨æ—‹è½¬ */
+
+    current = Encoder_ReadAB();
+    index = (uint8_t)((Encoder_LastAB << 2) | current);
+    Encoder_LastAB = current;
+    Encoder_SubSteps += Encoder_Transition[index];
 }
 
-
-/**
- * @brief °´¼üÏû¶¶¡¢¶Ì°´ºÍ³¤°´¼ì²â
- *
- * ¶Ì°´£ºËÉ¿ªºó²úÉú CONFIRM
- * ³¤°´£º°´ÏÂ³ÖĞø 700ms ºó²úÉú BACK
- *
- * ±ØĞëÔÚÖ÷Ñ­»·ÖĞ³ÖĞøµ÷ÓÃ£¬²»Òª·Å½øÖĞ¶Ï¡£
- */
-void Encoder_ButtonTask(void)
+/* æŒ‰é”®é‡‡æ ·ï¼Œæ¯ 1ms è°ƒç”¨ä¸€æ¬¡ã€‚
+ * æ¶ˆæŠ–ï¼šä¸å½“å‰ç¨³å®šçŠ¶æ€ä¸åŒçš„ç”µå¹³å¿…é¡»è¿ç»­ä¿æŒ 30msï¼Œä¸­é—´åªè¦å›åˆ°åŸç”µå¹³å°±é‡æ–°è®¡æ—¶ã€‚
+ * æŠ—æ—‹è½¬ä¸²æ‰°ï¼šæ—‹è½¬å 150ms å†…æŒ‰é”®ä¸€å¾‹è§†ä¸ºæ¾å¼€ï¼›è‹¥æŒ‰ä¸‹è¿‡ç¨‹ä¸­å‘ç”Ÿæ—‹è½¬ï¼Œ
+ * æœ¬æ¬¡æŒ‰é”®ä½œåºŸï¼Œæ¾å¼€æ—¶ä¸äº§ç”ŸçŸ­æŒ‰äº‹ä»¶ï¼Œä¹Ÿä¸ä¼šè§¦å‘é•¿æŒ‰ã€‚ */
+static void Encoder_ButtonSample(void)
 {
     uint32_t now = HAL_GetTick();
+    uint8_t raw_pressed;
 
-    GPIO_PinState raw =
-        HAL_GPIO_ReadPin(ENCODER_SW_PORT, ENCODER_SW_PIN);
+    if (!enc_ready) return;
+    raw_pressed =
+        (HAL_GPIO_ReadPin(ENCODER_SW_PORT, ENCODER_SW_PIN) == GPIO_PIN_RESET) ? 1U : 0U;
 
-    /* ¼ÇÂ¼Ô­Ê¼µçÆ½±ä»¯ */
-    if (raw != button_raw_last)
+    if ((now - last_rotate_tick) < ENCODER_ROTATE_GUARD_MS)
     {
-        button_raw_last = raw;
-        button_change_tick = now;
+        if (button_pressed) press_aborted = 1;
+        raw_pressed = 0;
     }
 
-    /* µçÆ½ÎÈ¶¨ 20ms ºó£¬È·ÈÏ°´¼ü×´Ì¬·¢Éú±ä»¯ */
-    if ((now - button_change_tick) >= ENCODER_DEBOUNCE_MS)
+    if (raw_pressed != button_pressed)
     {
-        if (raw != button_stable)
+        if (++button_count >= ENCODER_DEBOUNCE_MS)
         {
-            button_stable = raw;
+            button_count = 0;
+            button_pressed = raw_pressed;
 
-            if (button_stable == GPIO_PIN_RESET)
+            if (button_pressed)
             {
-                /* °´ÏÂ */
                 button_press_tick = now;
                 long_press_sent = 0;
+                press_aborted = 0;
             }
-            else
+            else if (!long_press_sent && !press_aborted)
             {
-                /* ËÉ¿ª£ºÈôÖ®Ç°²»ÊÇ³¤°´£¬ÔòÈÏ¶¨Îª¶Ì°´ */
-                if (!long_press_sent)
-                {
-                    button_event = ENCODER_BUTTON_CONFIRM;
-                }
+                button_event = ENCODER_BUTTON_CONFIRM;      /* æ¾å¼€æ—¶äº§ç”ŸçŸ­æŒ‰ */
             }
         }
     }
+    else
+    {
+        button_count = 0;
+    }
 
-    /* ³¤°´ÊÂ¼şÖ»²úÉúÒ»´Î */
-    if ((button_stable == GPIO_PIN_RESET) &&
-        (!long_press_sent) &&
-        ((now - button_press_tick) >= ENCODER_LONG_MS))
+    if (button_pressed && !long_press_sent && !press_aborted &&
+        (now - button_press_tick) >= ENCODER_LONG_MS)
     {
         button_event = ENCODER_BUTTON_BACK;
         long_press_sent = 1;
     }
 }
 
+/* åœ¨ SysTick_Handler ä¸­æ¯ 1ms è°ƒç”¨ä¸€æ¬¡ï¼ˆè§ stm32f1xx_it.cï¼‰ã€‚ */
+void Encoder_Tick1ms(void)
+{
+    tick_hooked = 1;
+    Encoder_ButtonSample();
+}
 
-/**
- * @brief È¡³öÒ»´Î°´¼üÊÂ¼ş
- */
+/* å…¼å®¹æ—§æ¥å£ï¼šå·²æ¥å…¥ 1ms èŠ‚æ‹æ—¶ä¸åšä»»ä½•äº‹ï¼›
+ * æœªæ¥å…¥æ—¶é€€åŒ–ä¸ºä¸»å¾ªç¯è½®è¯¢ï¼ˆä¸»å¾ªç¯æ…¢æ—¶æ¶ˆæŠ–æ•ˆæœä¼šå˜å·®ï¼Œå»ºè®®æ¥å…¥ 1ms èŠ‚æ‹ï¼‰ã€‚ */
+void Encoder_ButtonTask(void)
+{
+    static uint32_t last_poll = 0;
+    uint32_t now = HAL_GetTick();
+    uint32_t n;
+
+    if (tick_hooked) return;
+
+    n = now - last_poll;                 /* æŒ‰ç»è¿‡çš„æ¯«ç§’æ•°è¡¥é‡‡æ ·ï¼Œä¿è¯æ¶ˆæŠ–æ—¶é—´å‡†ç¡® */
+    last_poll = now;
+    if (n > 100U) n = 100U;
+    while (n-- > 0U) Encoder_ButtonSample();
+}
+
 EncoderButtonEvent Encoder_GetButtonEvent(void)
 {
     EncoderButtonEvent temp;
@@ -214,14 +219,9 @@ EncoderButtonEvent Encoder_GetButtonEvent(void)
 
     primask = __get_PRIMASK();
     __disable_irq();
-
     temp = button_event;
     button_event = ENCODER_BUTTON_NONE;
-
-    if (primask == 0U)
-    {
-        __enable_irq();
-    }
+    if (primask == 0U) __enable_irq();
 
     return temp;
 }

@@ -403,6 +403,12 @@ static void Draw_PageFocus(void)
         ShowRow(2, buf);
         ShowRow(3, "Click:Start");
     }
+    else if (s_focusState == FOCUS_PAUSED)
+    {
+        snprintf(buf, sizeof(buf), "Set:%um Paused", (unsigned)s_focusMinutes);
+        ShowRow(2, buf);
+        ShowRow(3, "Click:Resume");
+    }
     else if (s_focusState == FOCUS_FINISHED)
     {
         ShowRow(2, "Focus complete!");
@@ -410,8 +416,8 @@ static void Draw_PageFocus(void)
     }
     else
     {
-        ShowRow(2, s_focusState == FOCUS_RUNNING ? "Keep focusing" : "Paused");
-        ShowRow(3, s_focusState == FOCUS_RUNNING ? "Click:Pause" : "Click:Resume");
+        ShowRow(2, "Keep focusing");
+        ShowRow(3, "Click:Pause");
     }
     s_focusShownSecond = remaining;
     s_focusDirty = 0;
@@ -423,7 +429,7 @@ static void Draw_PageAbout(void)
     ShowRow(0, "PROJECT");
     ShowRow(1, "MCU:STM32F103C8");
     ShowRow(2, "OLED:SH1106 12864");
-    ShowRow(3, "FW:v1.2 ICON GUI");
+    ShowRow(3, "FW:v1.3 ICON GUI");
 }
 
 /* ------------------------------ 视图切换 ------------------------------ */
@@ -541,6 +547,27 @@ static void Focus_Reset(void)
     s_focusDirty = 1;
 }
 
+/* 旋转调时：未开始或已完成时重置到新时长；暂停时保持暂停并应用新时长。 */
+static void Focus_Adjust(int8_t steps)
+{
+    int16_t minutes = (int16_t)s_focusMinutes + steps;
+
+    if (minutes < (int16_t)FOCUS_MIN_MINUTES) minutes = FOCUS_MIN_MINUTES;
+    if (minutes > (int16_t)FOCUS_MAX_MINUTES) minutes = FOCUS_MAX_MINUTES;
+    s_focusMinutes = (uint8_t)minutes;
+
+    if (s_focusState == FOCUS_PAUSED)
+    {
+        s_focusRemaining = (uint32_t)s_focusMinutes * 60UL;
+        s_focusShownSecond = 0xFFFFFFFFUL;
+        s_focusDirty = 1;
+    }
+    else
+    {
+        Focus_Reset();
+    }
+}
+
 static void Focus_Confirm(void)
 {
     uint32_t now = HAL_GetTick();
@@ -613,15 +640,9 @@ static uint8_t Focus_DetailInput(int8_t step, EncoderButtonEvent ev)
     {
         Focus_Confirm();
     }
-    else if (s_focusState == FOCUS_IDLE && step != 0)
+    else if (step != 0 && s_focusState != FOCUS_RUNNING)
     {
-        if (step > 0)
-            s_focusMinutes = (s_focusMinutes >= FOCUS_MAX_MINUTES) ?
-                             FOCUS_MIN_MINUTES : (uint8_t)(s_focusMinutes + 1U);
-        else
-            s_focusMinutes = (s_focusMinutes <= FOCUS_MIN_MINUTES) ?
-                             FOCUS_MAX_MINUTES : (uint8_t)(s_focusMinutes - 1U);
-        Focus_Reset();
+        Focus_Adjust(step);
     }
     return 1;
 }
