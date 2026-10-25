@@ -2,11 +2,11 @@
 
 基于 STM32F103C8T6 + ESP32（AT 固件）的桌面电子时钟：OLED 显示大字号时间、日期、北京天气与室内温湿度，旋转编码器操作六项图标菜单，断网时靠 DS1302 继续走时。
 
-- 版本：v1.3（图标 GUI、改进编码器消抖、专注暂停可调时）
+- 版本：v1.4（蜂鸣器提醒、闹钟四模式与贪睡、专注休息周期、设置掉电保存）
 - 主控：STM32F103C8T6（Cortex-M3，64KB Flash / 20KB RAM，HSE 8MHz × 9 = 72MHz）
 - 开发环境：STM32CubeMX + Keil MDK（ARMCC V5.06，-O3）+ STM32F1 HAL 库
-- 资源占用：Flash 27.78KB（43%）、RAM 4.42KB（22%）
-- 编译状态：0 Error / 4 Warning（4 个均为文件末尾缺换行，无实质问题）
+- 资源占用：Flash 31.16KB（49%）、RAM 4.52KB（23%）
+- 编译状态：0 Error / 0 Warning
 
 ---
 
@@ -19,8 +19,8 @@
 | CLOCK/WX | 天气状况文字、日期星期、`HH:MM:SS`、气温/湿度/风速 |
 | INDOOR | SHT30 实测温度与相对湿度，2 秒采样一次 |
 | WIFI | ESP32 模块、WiFi、校时、天气四项各自是否正常 |
-| ALARM | 每日闹钟的时、分、开关设置；触发后全屏提醒 |
-| FOCUS | 1~99 分钟专注倒计时，支持开始/暂停/继续/重置 |
+| ALARM | 闹钟时分 + 四种模式（关/一次/每天/工作日）；响铃三阶段升级、支持贪睡 |
+| FOCUS | 专注倒计时 + 休息周期，1~99 分钟可调，结束有提示音 |
 | PROJECT | MCU、OLED 型号和固件版本 |
 
 **导航**
@@ -29,16 +29,23 @@
 - 详情：长按返回菜单；闹钟在编辑状态下长按只退出编辑，不返回菜单
 
 **闹钟**
-- 默认 07:00、关闭；短按进入编辑，旋转调值，短按依次切换「时 → 分 → 开关 → 完成」，当前字段反白
-- 编辑状态下长按只退出编辑，不穿透到返回菜单
-- 触发后全屏提醒 60 秒，短按停止，长按停止并回菜单
-- 同一天同一设定时刻只触发一次；若 ESP-AT 忙等跨过了设定分钟，5 分钟内补响一次
+- 默认 07:00、`OFF`；短按进入编辑，旋转调值，短按依次切换「时 → 分 → 模式 → 完成」，当前字段反白
+- 模式：`OFF` / `ONCE`（响一次后自动关闭并保存）/ `DAILY` / `WKDAY`（周一至周五）
+- 响铃全屏提醒，**铃声随响铃时长升级**：前 15 秒单声、15~40 秒双声、40 秒后急促三连
+- 响铃时短按 **贪睡 5 分钟**，长按关闭；60 秒无人响应自动进入贪睡，最多再响 2 次
+- 同一天同一设定时刻只触发一次；ESP-AT 忙等跨过设定分钟时，5 分钟内补响一次
 
 **专注**
-- 未启动时旋转调时长（1~99 分钟，默认 25），短按开始
-- 运行中短按暂停；**暂停时旋转仍可调时长**，短按继续；完成后旋转选择新时长或短按复位
-- 运行过程中不接受旋转调时，避免误操作改变剩余时间
-- 计时基于**绝对截止时间**，切换页面、进入菜单都不中断；完成时自动跳到专注页
+- 未启动时旋转调时长（1~99 分钟，默认 25；快速旋转按 5 分钟一档加速），短按开始
+- 运行中短按暂停；**暂停时旋转仍可调时长**，长按放弃本轮回到待机
+- 专注结束短按进入休息：默认 5 分钟，每完成 4 轮给一次 15 分钟长休息；休息中短按可跳过，休息结束短按回到待机
+- 专注/休息结束各有提示音，最长响 30 秒，之后保持 `DONE`/`END` 状态等确认
+- 计时基于**绝对截止时间**，切换页面、进入菜单都不中断
+
+**提醒音**
+- 无源蜂鸣器由 TIM2_CH1 的 PWM 驱动，音符表 + 非阻塞状态机，不占用延时
+- 操作反馈音：短按确认、专注开始（上扬）、暂停（下行）、贪睡（两短声）、保存成功
+- 闹钟优先级高于专注提示；响铃期间暂停联网请求，避免 AT 忙等把铃声卡在某个音上
 
 **时间与联网**
 - 上电先读 DS1302 立即显示，再联网校时（无网也能看时间）
@@ -57,6 +64,7 @@
 | 温湿度 | SHT30 | I2C1 @100kHz，地址 0x44 | PB6 SCL、PB7 SDA |
 | WiFi | ESP32（AT 固件） | USART2 @115200 | PA2 TX→ESP RX、PA3 RX←ESP TX |
 | 编码器 | 带按键旋转编码器 | A/B 双边沿 EXTI + 按键轮询 | PB14 A、PB12 B、PB13 SW |
+| 蜂鸣器 | 无源蜂鸣器 / 蜂鸣器模块 | TIM2_CH1 PWM | PA0 |
 | 调试 | USB-TTL | USART1 @115200 | PA9 TX、PA10 RX |
 
 **接线要点**
@@ -65,7 +73,8 @@
 - DS1302 的 I/O 是准双向口，驱动内部会在读之前切换输入/输出方向，无需外部上拉
 - PA6（SPI1_MISO）已配置但本设计不用，OLED 是单向写
 - PB4 复位后默认是 JTAG 的 NJTRST，驱动里已开 AFIO 时钟做重映射，仿真器需设为 SWD 模式
-- **没有蜂鸣器**：闹钟和专注完成都只有屏幕提示，无声音输出
+- 蜂鸣器必须是**无源**（靠 PWM 频率发声）；有源蜂鸣器只会一直响同一个音。直连请串 100Ω~1kΩ 限流并确认驱动电流
+- 蜂鸣器模块若为**低电平触发**，保持 `interface/beep.c` 里 `BEEP_IDLE_HIGH = 1`（静音输出高）；高电平触发改为 `0`。接的不是 PA0/TIM2_CH1 时，改 `BEEP_TIM` / `BEEP_CHANNEL` 两个宏即可
 
 ---
 
@@ -74,18 +83,20 @@
 ```
 ┌──────────────────────────────────────────────┐
 │  app/        应用层（业务逻辑，不碰寄存器）      │
-│    ui_app.c     三态导航、闹钟/专注状态机、绘图   │
+│    ui_app.c     三态导航、闹钟/专注状态机、提醒音调度│
 │    ui_assets.c  图标与 16x32 数字字模（Flash）   │
 │    net_app.c    联网调度、时间/天气、首页文本区   │
+│    reminder_store.c  闹钟/专注设置掉电保存       │
 └───────────────┬──────────────────────────────┘
                 │  只调用驱动层接口
 ┌───────────────┴──────────────────────────────┐
 │  interface/  驱动层（硬件相关，各自封装）        │
 │    oled.c     SH1106 显存+绘图（SPI1）          │
-│    ds1302.c   RTC 读写（3 线软件时序）          │
+│    ds1302.c   RTC 读写 + 后备 RAM（3 线时序）   │
 │    SHT3x.c    I2C 温湿度 + CRC 校验             │
 │    esp32.c    AT 指令、SNTP 校时、HTTP 天气解析  │
 │    encoder.c  EXTI 正交解码 + 按键状态机        │
+│    beep.c     TIM2 PWM + 音符表非阻塞播放       │
 └───────────────┬──────────────────────────────┘
                 │
 ┌───────────────┴──────────────────────────────┐
@@ -95,13 +106,14 @@
 └──────────────────────────────────────────────┘
 ```
 
-**调用链**：`main()` → `UI_Init()` →（`Encoder_Init` → `NetApp_Init` → `Sht_Update` → `EnterHome`）→ 死循环 `UI_Process()`。
+**调用链**：`main()` →（`MX_TIM2_Init`）→ `UI_Init()` →（`Beep_Init` → `Encoder_Init` → `NetApp_Init` → `ReminderStore_Load` → `Sht_Update` → `EnterHome`）→ 死循环 `UI_Process()`。
 
 `UI_Process()` 是唯一调度中心，每轮固定顺序：
 
 ```
-读编码器 → HandleInput() → NetApp_Process() → Alarm_Process()
-        → Focus_Process() → 采温湿度 → 按 dirty/周期重绘当前页
+读编码器 → HandleInput() → Alarm_Process() → Focus_Process()
+        → Reminder_UpdateBeep() → Beep_Process() → NetApp_PauseNetwork()
+        → NetApp_Process() → 采温湿度 → 按 dirty/周期重绘当前页
         → Refresh_StatusIcons() → OLED_Refresh_Gram()
 ```
 
@@ -209,6 +221,36 @@ A/B 改为**双边沿** EXTI，用 16 项状态表（`Encoder_Transition[前一�
 这解决的现象是：转动编码器时偶尔会误进菜单、或刚进专注页就被"短按"开始计时，导致时长调不动。
 
 > 兼容：`Encoder_ButtonTask()` 保留。若未接入 1ms 节拍，它会按经过的毫秒数补采样（主循环慢时效果变差），功能不会丢。
+> **注意**：`Encoder_Tick1ms()` 的调用必须写在 `stm32f1xx_it.c` 的 `USER CODE BEGIN/END SysTick_IRQn 1` 区间内，否则 CubeMX 重新生成代码时会把它删掉。
+
+### 4.9 提醒音系统（v1.4）
+
+蜂鸣器是无源的，靠 PWM 频率发声：`Beep_Tone()` 按 `1MHz / freq` 算 ARR、CCR 取一半得到 50% 占空比。所有提示音都是 `{频率, 时长}` 的音符表：
+
+```c
+static const Note_t kAlarm2[] = {{2000,120},{0,80},{2000,120},{0,680}};   /* 双声，0=休止 */
+```
+
+`Beep_Process()` 在主循环里比对 `HAL_GetTick()` 切换音符，**全程不阻塞**。循环型提示音（闹钟三阶段、专注结束、休息结束）会一直重复，直到 `Beep_Stop()`。
+
+调度上分两层：
+- `Reminder_UpdateBeep()` 决定「当前应该响哪一种」，只在类型变化时切换，避免每圈重启音符
+- `UiBeep()` 负责操作反馈音，且**在提醒响铃期间自动让路**（`s_ringKind != 0` 时不播放）
+
+优先级：闹钟 > 专注提示 > 操作反馈。闹钟响铃阶段按经过时间自动升级（15s / 40s 两个门槛）。
+
+响铃期间 `NetApp_PauseNetwork(1)` 会掐掉重连、校时、天气请求——否则 AT 忙等 15~60 秒会让音符卡死在当前音上。DS1302 读时和屏幕刷新不受影响。
+
+### 4.10 设置持久化（v1.4）
+
+闹钟时分、模式、专注时长存在 **DS1302 的 31 字节后备 RAM** 里，靠纽扣电池保持，不需要额外 EEPROM。
+
+- 地址：`0xC0/0xC1 + 2n`（n=0~30），用 n=0~5
+- 结构：魔数 `0xA6` + 4 个数据字节 + 校验字节（4 字节异或 0x5A）
+- 写入顺序：先写数据、**最后写魔数**，保证掉电中断时不会出现「魔数有效但数据半新半旧」
+- 读取：魔数、校验、范围（时 0~23 / 分 0~59 / 模式 0~3 / 时长 1~99）全部通过才采用，否则回落到默认值
+- 保存时机：闹钟编辑完成、`ONCE` 模式响完自动关闭、专注开始时
+- 必须在 `ds1032_init()` 之后才能读写，所以 `UI_Init()` 里放在 `NetApp_Init()` 后面
 
 ---
 
@@ -230,6 +272,10 @@ A/B 改为**双边沿** EXTI，用 16 项状态表（`Encoder_Transition[前一�
 **图标菜单（MENU）**：中央 (44,4) 40×40 图标，左右箭头 (4,18)/(112,18) 各 12×12，底部居中页面名称，主图标右侧 (88,4) 可挂 8×8 状态角标。
 
 **详情页（DETAIL）**：标题行占 14 字符，右上角 (120,0) 显示 8×8 状态图标，其余三行各 16 字符。
+
+**闹钟页的状态**：`Time: 07:00` + `State:OFF/ONCE/DAILY/WKDAY` + 操作提示；编辑时当前字段反白。响铃态换成 `!!! ALARM !!!` + 当前时间 + `Click:Snooze 5m` / `Hold :Stop`；贪睡态第二行显示 `Snooze mm:ss` 倒计时。
+
+**专注页的状态**：标题在 `FOCUS` / `BREAK` 之间切换，第二行是 `mm:ss 状态词`（`READY`/`RUN`/`PAUSE`/`DONE`/`REST`/`END`），第三行随状态显示 `Set:Nm Turn`、`Round N Focus`、`Relax N min`、`Break over!` 等。
 
 > 排版约定：文本行统一用 `ShowRow()` / `ShowRowN()` 写满固定宽度，右补空格覆盖旧内容，避免残影。
 
@@ -255,6 +301,14 @@ A/B 改为**双边沿** EXTI，用 16 项状态表（`Encoder_Transition[前一�
 | `app/ui_app.c` | `ALARM_CATCHUP_MIN` | 5 | 漏检补响的最大跨度（分钟） |
 | `app/ui_app.c` | `FOCUS_DEFAULT_MIN` | 25 | 专注默认时长 |
 | `app/ui_app.c` | `FOCUS_MIN/MAX_MINUTES` | 1 / 99 | 专注时长上下限 |
+| `app/ui_app.c` | `ALARM_SNOOZE_MS` | 300000 | 贪睡时长（5 分钟） |
+| `app/ui_app.c` | `ALARM_AUTO_REPEATS` | 2 | 无人响应时自动贪睡的最大次数 |
+| `app/ui_app.c` | `ALARM_STAGE2/3_MS` | 15000 / 40000 | 铃声升级为双声 / 急促的门槛 |
+| `app/ui_app.c` | `FOCUS_RING_MS` | 30000 | 专注/休息结束提示音最长时长 |
+| `app/ui_app.c` | `FOCUS_BREAK_MIN` / `FOCUS_LONG_BREAK_MIN` | 5 / 15 | 短休息 / 长休息分钟数 |
+| `app/ui_app.c` | `FOCUS_LONG_BREAK_EVERY` | 4 | 每几轮专注给一次长休息 |
+| `interface/beep.c` | `BEEP_TIM` / `BEEP_CHANNEL` | htim2 / CH1 | 蜂鸣器所用定时器与通道 |
+| `interface/beep.c` | `BEEP_IDLE_HIGH` | 1 | 1=静音输出高（低电平触发模块），0=反之 |
 | `interface/encoder.c` | `ENCODER_DEBOUNCE_MS` | 30 | 按键稳定窗口 |
 | `interface/encoder.c` | `ENCODER_STEPS_PER_DETENT` | 4 | 每个机械档位的正交边沿数 |
 | `interface/encoder.c` | `ENCODER_ROTATE_GUARD_MS` | 150 | 旋转后忽略按键的互锁时间 |
@@ -273,7 +327,7 @@ A/B 改为**双边沿** EXTI，用 16 项状态表（`Encoder_Transition[前一�
 3. 仿真器设 **SWD** 模式（PB4 被 DS1302 占用，JTAG 不可用），`F8` 下载
 4. 串口助手接 PA9/PA10，**115200 8N1**，可看到启动流程和 AT 交互日志（`printf` 已重定向到 USART1）
 
-当前编译结果：`Code=23240  RO-data=4580  RW-data=628  ZI-data=3900`，即 ROM 27.78KB / RAM 4.42KB。4 个警告全部是 `last line of file ends without a newline`，本次来自 `encoder.c` / `encoder.h`；`ds1302.c/h`、`esp32.c` 也有同样问题，全量编译时会出现更多同类警告，给文件末尾补一个换行即可消除。
+当前编译结果：`Code=26394  RO-data=4850  RW-data=660  ZI-data=3972`，即 ROM 31.16KB / RAM 4.52KB，0 Error / 0 Warning。增量编译时若某些文件未被重新编译，`last line of file ends without a newline` 警告会时有时无，属正常。
 
 改外设配置请用 CubeMX 打开 `ESP32.ioc` 重新生成，**只改 `USER CODE BEGIN/END` 之间**的内容，否则重新生成会被覆盖。
 
@@ -286,7 +340,7 @@ ESP32/
 ├── ESP32.ioc                CubeMX 工程（引脚/时钟/外设配置源）
 ├── .mxproject               CubeMX 生成缓存
 ├── Core/
-│   ├── Inc/                 gpio/i2c/spi/usart/main 头文件、HAL 配置
+│   ├── Inc/                 gpio/i2c/spi/tim/usart/main 头文件、HAL 配置
 │   └── Src/                 初始化代码、中断入口、printf 重定向
 ├── Drivers/                 STM32F1 HAL + CMSIS（原样引入，不修改）
 ├── interface/               硬件驱动层
@@ -294,10 +348,12 @@ ESP32/
 │   ├── ds1302.c/h           DS1302 三线时序
 │   ├── SHT3x.c/h            SHT30 I2C 驱动（含 CRC8）
 │   ├── esp32.c/h            AT 指令封装、SNTP、HTTP 天气
-│   └── encoder.c/h          正交编码器 + 按键状态机
+│   ├── encoder.c/h          正交编码器 + 按键状态机
+│   └── beep.c/h             蜂鸣器 PWM 驱动 + 音符表播放
 ├── app/                     应用层
 │   ├── net_app.c/h          联网调度、时间天气数据、首页文本区
 │   ├── ui_app.c/h           三态导航、闹钟与专注状态机、各页绘制
+│   ├── reminder_store.c/h   闹钟/专注设置存 DS1302 后备 RAM
 │   └── ui_assets.c/h        6 个 40x40 图标、8x8 状态图标、16x32 数字字模
 └── MDK-ARM/                 Keil 工程与编译产物（产物已 gitignore）
 ```
@@ -318,7 +374,7 @@ ESP32/
 - 每次 SNTP 校时最长 15 秒（15 次 1 秒轮询）
 - 天气请求 15 秒
 
-现象是「隔一段时间按键突然失灵」。v1.2 已用绝对截止时间把专注计时的损失兜住、用 5 分钟补响兜住闹钟漏检，但这只是补偿，不是根治。根治方案是把 AT 交互改成状态机（发送即返回，主循环里查结果）。
+现象是「隔一段时间按键突然失灵」。已有三层缓解：绝对截止时间兜住专注计时、5 分钟补响兜住闹钟漏检、响铃期间暂停联网请求保证铃声不断。但这都是补偿，不是根治——根治方案是把 AT 交互改成状态机（发送即返回，主循环里查结果）。
 
 **③ WiFi 密码硬编码在 `app/net_app.h`，已进入 git 历史**
 公开仓库前必须处理：把 SSID/密码抽到 `app/net_config.h`（加入 `.gitignore`），仓库里只留 `net_config.example.h` 模板，再用 `git filter-repo` 清理历史。当前仓库只适合本地或私有远端。
@@ -326,16 +382,16 @@ ESP32/
 **④ 部分源文件仍是 GBK 编码**
 `interface/oledfont.h` 仍是 GBK，其余主要源码已统一为 UTF-8。建议将剩余字库转为 UTF-8，并在 Keil 里设 `Edit → Configuration → Encoding = UTF-8`。
 
-**⑤ `Encoder_Tick1ms()` 的调用位置在 USER CODE 块之外**
-`Core/Src/stm32f1xx_it.c` 里这行是直接加在 `HAL_IncTick();` 之后的，不在 `USER CODE BEGIN/END SysTick_IRQn` 区间内。**下次用 CubeMX 重新生成代码时会被删掉**。届时编码器自动退回主循环轮询（功能不丢，但联网阻塞期间消抖失效）。建议把它移到 `USER CODE BEGIN SysTick_IRQn 1` 里。
+**⑤ CubeMX 重新生成会清空生成区**
+v1.4 已把 `Encoder_Tick1ms()` 的调用移进 `USER CODE BEGIN/END SysTick_IRQn 1`，不会再被删掉。但每次改 `ESP32.ioc` 重新生成后，仍应确认这行还在——它是按键消抖的唯一节拍源。
 
 **⑥ 显存仍整帧提交**
 一帧只传一次 1KB GRAM，无变化不传输，已经够用。若后续要压帧率或降功耗，可再做脏区域局部刷新。
 
 **⑦ 其他**
-- 闹钟只有屏幕提示，**没有声音**——原理图未分配蜂鸣器引脚。这让闹钟实用性有限，是硬件层面的待办
-- 闹钟设置、专注时长都只存在 RAM，掉电丢失；页面位置也不保存
-- 无 DS1302 备用电池电压检测，电池耗尽后只能靠联网校时
+- `Draw_PageAbout()` 里的固件版本字符串仍是 `v1.3`，与当前 v1.4 不一致，需要手动同步
+- 专注的「已完成轮数」`s_focusSessions` 只在 RAM，掉电清零（闹钟与专注时长本身已存 DS1302 后备 RAM）
+- 无 DS1302 备用电池电压检测；电池耗尽时后备 RAM 一起失效，设置回落到默认值
 - 天气备用接口（`current_weather=true`）不返回湿度，降级时湿度显示 `--`
 - `MDK-ARM/ESP32.uvoptx` 被跟踪，Keil 每次增删文件或改窗口都会产生改动，建议 `git rm --cached` 后加入 `.gitignore`
 - `Core/Src/main.c` 里的 `uint8_t buff[1000]` 未被使用，可删
@@ -349,5 +405,5 @@ ESP32/
 | v1.0 | `299b339` | 首个可用版本：三页界面、DS1302 走时、SNTP 校时回写、天气、SHT30、编码器交互、断网降级 |
 | v1.1 | 未单独提交 | 扩展六页 GUI，新增每日软件闹钟、全屏提醒和可后台运行的专注倒计时 |
 | v1.2 | `4efd612` | 大时间首页、六项表驱动图标菜单、动态状态图标、任意坐标位图与统一显存提交（v1.1 改动一并提交） |
-| 文档 | 本次提交 | README 同步至 v1.2 实际实现，补充布局坐标、状态机规则与资源占用 |
+| v1.4 | `1e5faf3` | 蜂鸣器提醒（TIM2 PWM 音符表）、闹钟四模式与贪睡/自动重响/三阶段铃声、专注休息周期、设置存 DS1302 后备 RAM |
 | v1.3 | `fad907b` | 编码器改为完整正交解码 + 1ms 节拍消抖 + 旋转互锁；专注暂停时可旋转调时 |
