@@ -187,10 +187,8 @@ void SysTick_Handler(void)
 
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
-	  Encoder_Tick1ms();
-
   /* USER CODE BEGIN SysTick_IRQn 1 */
-
+  Encoder_Tick1ms();          /* 编码器按键消抖的 1ms 节拍，必须在 USER CODE 区内 */
   /* USER CODE END SysTick_IRQn 1 */
 }
 

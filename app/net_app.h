@@ -43,4 +43,8 @@ void NetApp_GetStatus(NetStatus_t *st);
 /* 页面控制：on=0 暂停本模块对 OLED 的绘制；on=1 恢复并整页重绘（调用前先 OLED_Clear） */
 void NetApp_SetDisplay(uint8_t on);
 
+/* 响铃/提示期间暂停联网请求（重连、校时、天气），避免阻塞导致铃声卡顿；
+ * DS1302 读时和 OLED 刷新不受影响。on=0 恢复。 */
+void NetApp_PauseNetwork(uint8_t on);
+
 #endif

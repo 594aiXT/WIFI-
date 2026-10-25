@@ -20,6 +20,7 @@
 #include "main.h"
 #include "i2c.h"
 #include "spi.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -29,6 +30,7 @@
 #include "stdlib.h"
 #include "oled.h"
 #include "ui_app.h"
+#include "beep.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -96,10 +98,9 @@ int main(void)
   MX_USART2_UART_Init();
   MX_SPI1_Init();
   MX_I2C1_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
   OLED_Init();
-printf("初始化完成....\r\n");
-printf("OLED显示\r\n");
 
  UI_Init(); 
   /* USER CODE END 2 */
@@ -109,9 +110,10 @@ printf("OLED显示\r\n");
   while (1)
   {
     /* USER CODE END WHILE */
-    UI_Process(); 
+	UI_Process();
     /* USER CODE BEGIN 3 */
   }
+	
   /* USER CODE END 3 */
 }
 

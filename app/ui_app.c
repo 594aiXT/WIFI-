@@ -4,6 +4,8 @@
 #include "SHT3x.h"
 #include "oled.h"
 #include "ui_assets.h"
+#include "beep.h"
+#include "reminder_store.h"
 #include "i2c.h"            /* hi2c1 */
 #include <stdio.h>
 #include <string.h>
@@ -17,6 +19,16 @@
 #define FOCUS_MIN_MINUTES   1U
 #define FOCUS_MAX_MINUTES   99U
 
+/* ---- 闹钟 / 专注提醒参数 ---- */
+#define ALARM_SNOOZE_MS         (5UL * 60UL * 1000UL)   /* 贪睡 5 分钟                   */
+#define ALARM_AUTO_REPEATS      2U                      /* 无人响应时最多自动再响 2 次    */
+#define ALARM_STAGE2_MS         15000UL                 /* 响铃 15s 后升级为双声          */
+#define ALARM_STAGE3_MS         40000UL                 /* 响铃 40s 后升级为急促          */
+#define FOCUS_RING_MS           30000UL                 /* 专注/休息结束后最长提示 30s    */
+#define FOCUS_BREAK_MIN         5U                      /* 短休息                         */
+#define FOCUS_LONG_BREAK_MIN    15U                     /* 长休息                         */
+#define FOCUS_LONG_BREAK_EVERY  4U                      /* 每完成 4 轮专注给一次长休息    */
+
 typedef enum
 {
     UI_MODE_HOME = 0,
@@ -29,8 +41,19 @@ typedef enum
     FOCUS_IDLE = 0,
     FOCUS_RUNNING,
     FOCUS_PAUSED,
-    FOCUS_FINISHED
+    FOCUS_FINISHED,
+    FOCUS_BREAK,            /* 休息倒计时 */
+    FOCUS_BREAK_FINISHED
 } FocusState;
+
+typedef enum
+{
+    ALARM_MODE_OFF = 0,
+    ALARM_MODE_ONCE,        /* 仅响一次，响后自动关闭 */
+    ALARM_MODE_DAILY,
+    ALARM_MODE_WEEKDAYS,    /* 周一到周五 */
+    ALARM_MODE_COUNT
+} AlarmMode;
 
 typedef uint8_t (*UIInputHandler)(int8_t step, EncoderButtonEvent ev);
 typedef void (*UIDrawHandler)(void);
@@ -87,7 +110,7 @@ static uint8_t  s_shtDirty = 1;
 /* 每日软件闹钟。 */
 static uint8_t  s_alarmHour = 7;
 static uint8_t  s_alarmMinute = 0;
-static uint8_t  s_alarmEnabled = 0;
+static uint8_t  s_alarmMode = ALARM_MODE_OFF;
 static uint8_t  s_alarmEditing = 0;
 static uint8_t  s_alarmField = 0;
 static uint8_t  s_alarmRinging = 0;
@@ -98,6 +121,9 @@ static uint16_t s_alarmLastMinute = 0;
 static uint32_t s_alarmCheckDay = 0;     /* 上一次有效轮询日期 */
 static uint16_t s_alarmCheckMinute = 0;  /* 上一次有效轮询的当天分钟 */
 static uint8_t  s_alarmClockValid = 0;
+static uint8_t  s_alarmSnoozing = 0;
+static uint32_t s_alarmSnoozeUntil = 0;
+static uint8_t  s_alarmAutoRepeats = 0;
 
 /* 专注计时使用绝对截止时间，页面切换不会暂停计时。 */
 static FocusState s_focusState = FOCUS_IDLE;
@@ -106,6 +132,13 @@ static uint32_t s_focusRemaining = FOCUS_DEFAULT_MIN * 60UL;
 static uint32_t s_focusDeadline = 0;
 static uint32_t s_focusShownSecond = 0xFFFFFFFFUL;
 static uint8_t  s_focusDirty = 1;
+static uint8_t  s_focusSessions = 0;     /* 开机以来已完成的专注轮数 */
+static uint8_t  s_focusBreakMin = FOCUS_BREAK_MIN;
+static uint8_t  s_focusRinging = 0;      /* 专注/休息结束提示音是否在响 */
+static uint32_t s_focusRingStart = 0;
+
+static uint8_t  s_ringKind = 0;          /* 当前提醒音：0无 1~3闹钟阶段 4专注结束 5休息结束 */
+static int16_t  s_rotateDelta = 0;       /* 本圈编码器档位数（用于调时加速） */
 
 static uint32_t s_nextSht = 0;
 static uint32_t s_nextStatus = 0;
@@ -122,6 +155,53 @@ static FocusState s_menuFocusState = (FocusState)0xFFU;
 static int Due(uint32_t deadline)
 {
     return (int32_t)(HAL_GetTick() - deadline) >= 0;
+}
+
+/* ------------------------------ 提醒音 ------------------------------ */
+/* 闹钟优先于专注提示；闹钟响铃越久越急促。每圈调用一次。 */
+static void Reminder_UpdateBeep(void)
+{
+    static const BeepPattern_t kMap[6] =
+    {
+        BEEP_CLICK,         /* 0：未使用 */
+        BEEP_ALARM_1, BEEP_ALARM_2, BEEP_ALARM_3,
+        BEEP_FOCUS_DONE, BEEP_BREAK_DONE
+    };
+    uint8_t want = 0;
+
+    if (s_alarmRinging)
+    {
+        uint32_t elapsed = HAL_GetTick() - s_alarmRingStart;
+        want = (elapsed < ALARM_STAGE2_MS) ? 1U : (elapsed < ALARM_STAGE3_MS) ? 2U : 3U;
+    }
+    else if (s_focusRinging)
+    {
+        want = (s_focusState == FOCUS_BREAK_FINISHED) ? 5U : 4U;
+    }
+
+    if (want != s_ringKind)
+    {
+        s_ringKind = want;
+        if (want == 0U) Beep_Stop();
+        else            Beep_Play(kMap[want]);
+    }
+}
+
+/* 操作反馈音：提醒正在响时不打断它 */
+static void UiBeep(BeepPattern_t pattern)
+{
+    if (s_ringKind == 0U) Beep_Play(pattern);
+}
+
+/* 保存闹钟和专注时长到 DS1302 后备 RAM */
+static void Settings_Save(void)
+{
+    ReminderSettings_t s;
+    s.alarmHour    = s_alarmHour;
+    s.alarmMinute  = s_alarmMinute;
+    s.alarmMode    = s_alarmMode;
+    s.focusMinutes = s_focusMinutes;
+    ReminderStore_Save(&s);
 }
 
 static void ShowRowN(uint8_t row, uint8_t width, const char *s)
@@ -156,7 +236,7 @@ static void ShowTitle(const char *title, const uint8_t *statusIcon)
 static uint8_t CurrentAlarmIconState(void)
 {
     if (s_alarmRinging) return 2U;
-    return s_alarmEnabled ? 1U : 0U;
+    return (s_alarmMode != ALARM_MODE_OFF || s_alarmSnoozing) ? 1U : 0U;
 }
 
 static const uint8_t *WifiStatusIcon(void)
@@ -175,9 +255,9 @@ static const uint8_t *AlarmStatusIcon(void)
 
 static const uint8_t *FocusStatusIcon(void)
 {
-    if (s_focusState == FOCUS_RUNNING) return ui_status_focus_run_8x8;
+    if (s_focusState == FOCUS_RUNNING || s_focusState == FOCUS_BREAK) return ui_status_focus_run_8x8;
     if (s_focusState == FOCUS_PAUSED) return ui_status_focus_pause_8x8;
-    if (s_focusState == FOCUS_FINISHED) return ui_status_focus_done_8x8;
+    if (s_focusState == FOCUS_FINISHED || s_focusState == FOCUS_BREAK_FINISHED) return ui_status_focus_done_8x8;
     return NULL;
 }
 
@@ -332,6 +412,14 @@ static void Draw_PageNetwork(void)
     ShowRow(3, buf);
 }
 
+static const char *const s_alarmModeName[ALARM_MODE_COUNT] = {"OFF", "ONCE", "DAILY", "WKDAY"};
+
+static uint32_t Alarm_SnoozeRemainingSeconds(void)
+{
+    if (!s_alarmSnoozing || Due(s_alarmSnoozeUntil)) return 0;
+    return (uint32_t)((s_alarmSnoozeUntil - HAL_GetTick() + 999U) / 1000U);
+}
+
 static void Draw_PageAlarm(void)
 {
     char buf[24];
@@ -348,8 +436,8 @@ static void Draw_PageAlarm(void)
             ShowRow(1, buf);
         }
         else ShowRow(1, "--:--:--");
-        ShowRow(2, "Time to wake up!");
-        ShowRow(3, "Click:Stop");
+        ShowRow(2, "Click:Snooze 5m");
+        ShowRow(3, "Hold :Stop");
         s_alarmDirty = 0;
         return;
     }
@@ -358,7 +446,19 @@ static void Draw_PageAlarm(void)
     snprintf(buf, sizeof(buf), "Time: %02u:%02u",
              (unsigned)s_alarmHour, (unsigned)s_alarmMinute);
     ShowRow(1, buf);
-    snprintf(buf, sizeof(buf), "State:%s", s_alarmEnabled ? "ON DAILY" : "OFF");
+
+    if (s_alarmSnoozing && !s_alarmEditing)
+    {
+        uint32_t left = Alarm_SnoozeRemainingSeconds();
+        snprintf(buf, sizeof(buf), "Snooze %02lu:%02lu",
+                 (unsigned long)(left / 60U), (unsigned long)(left % 60U));
+        ShowRow(2, buf);
+        ShowRow(3, "Click:Cancel");
+        s_alarmDirty = 0;
+        return;
+    }
+
+    snprintf(buf, sizeof(buf), "State:%s", s_alarmModeName[s_alarmMode % ALARM_MODE_COUNT]);
     ShowRow(2, buf);
     ShowRow(3, s_alarmEditing ? "Click:Next" : "Click:Set");
 
@@ -366,14 +466,15 @@ static void Draw_PageAlarm(void)
     {
         if (s_alarmField == 0) OLED_InvertRect(48, 16, 16, 16);
         else if (s_alarmField == 1) OLED_InvertRect(72, 16, 16, 16);
-        else OLED_InvertRect(48, 32, s_alarmEnabled ? 64U : 24U, 16);
+        else OLED_InvertRect(48, 32,
+                             (uint8_t)(strlen(s_alarmModeName[s_alarmMode % ALARM_MODE_COUNT]) * 8U), 16);
     }
     s_alarmDirty = 0;
 }
 
 static uint32_t Focus_RemainingSeconds(void)
 {
-    if (s_focusState == FOCUS_RUNNING)
+    if (s_focusState == FOCUS_RUNNING || s_focusState == FOCUS_BREAK)
     {
         uint32_t now = HAL_GetTick();
         if (Due(s_focusDeadline)) return 0;
@@ -386,38 +487,50 @@ static void Draw_PageFocus(void)
 {
     char buf[24];
     uint32_t remaining = Focus_RemainingSeconds();
+    uint8_t onBreak = (s_focusState == FOCUS_BREAK || s_focusState == FOCUS_BREAK_FINISHED);
 
     OLED_Clear();
-    ShowTitle("FOCUS", FocusStatusIcon());
+    ShowTitle(onBreak ? "BREAK" : "FOCUS", FocusStatusIcon());
     snprintf(buf, sizeof(buf), "%02lu:%02lu %s",
              (unsigned long)(remaining / 60U),
              (unsigned long)(remaining % 60U),
              s_focusState == FOCUS_RUNNING ? "RUN" :
              s_focusState == FOCUS_PAUSED ? "PAUSE" :
-             s_focusState == FOCUS_FINISHED ? "DONE" : "READY");
+             s_focusState == FOCUS_FINISHED ? "DONE" :
+             s_focusState == FOCUS_BREAK ? "REST" :
+             s_focusState == FOCUS_BREAK_FINISHED ? "END" : "READY");
     ShowRow(1, buf);
 
-    if (s_focusState == FOCUS_IDLE)
+    switch (s_focusState)
     {
+    case FOCUS_IDLE:
         snprintf(buf, sizeof(buf), "Set:%umin Turn", (unsigned)s_focusMinutes);
         ShowRow(2, buf);
         ShowRow(3, "Click:Start");
-    }
-    else if (s_focusState == FOCUS_PAUSED)
-    {
-        snprintf(buf, sizeof(buf), "Set:%um Paused", (unsigned)s_focusMinutes);
+        break;
+    case FOCUS_RUNNING:
+        snprintf(buf, sizeof(buf), "Round %u Focus", (unsigned)(s_focusSessions + 1U));
         ShowRow(2, buf);
-        ShowRow(3, "Click:Resume");
-    }
-    else if (s_focusState == FOCUS_FINISHED)
-    {
-        ShowRow(2, "Focus complete!");
-        ShowRow(3, "Click:Reset");
-    }
-    else
-    {
-        ShowRow(2, "Keep focusing");
         ShowRow(3, "Click:Pause");
+        break;
+    case FOCUS_PAUSED:
+        ShowRow(2, "Hold:Reset");
+        ShowRow(3, "Click:Resume");
+        break;
+    case FOCUS_FINISHED:
+        snprintf(buf, sizeof(buf), "Done! Round %u", (unsigned)s_focusSessions);
+        ShowRow(2, buf);
+        ShowRow(3, "Click:Break");
+        break;
+    case FOCUS_BREAK:
+        snprintf(buf, sizeof(buf), "Relax %u min", (unsigned)s_focusBreakMin);
+        ShowRow(2, buf);
+        ShowRow(3, "Click:Skip");
+        break;
+    default:    /* FOCUS_BREAK_FINISHED */
+        ShowRow(2, "Break over!");
+        ShowRow(3, "Click:Next");
+        break;
     }
     s_focusShownSecond = remaining;
     s_focusDirty = 0;
@@ -468,6 +581,32 @@ static void EnterDetail(uint8_t page)
 }
 
 /* ------------------------------ 后台状态机 ------------------------------ */
+static void Alarm_StartRinging(void)
+{
+    s_alarmRinging = 1;
+    s_alarmSnoozing = 0;
+    s_alarmRingStart = HAL_GetTick();
+    s_alarmEditing = 0;
+    EnterDetail(UI_PAGE_ALARM);
+}
+
+/* 贪睡：5 分钟后再响 */
+static void Alarm_Snooze(void)
+{
+    s_alarmRinging = 0;
+    s_alarmSnoozing = 1;
+    s_alarmSnoozeUntil = HAL_GetTick() + ALARM_SNOOZE_MS;
+    s_alarmDirty = 1;
+}
+
+/* 关闭本次闹钟（含取消贪睡） */
+static void Alarm_Dismiss(void)
+{
+    s_alarmRinging = 0;
+    s_alarmSnoozing = 0;
+    s_alarmDirty = 1;
+}
+
 static void Alarm_Process(void)
 {
     BJTime_t now;
@@ -476,11 +615,27 @@ static void Alarm_Process(void)
     uint16_t scheduledMinute;
     uint8_t due = 0;
 
+    /* 响铃 60s 无人响应：自动转入贪睡，最多再响 ALARM_AUTO_REPEATS 次 */
     if (s_alarmRinging && Due(s_alarmRingStart + ALARM_RING_MS))
     {
-        s_alarmRinging = 0;
-        s_alarmDirty = 1;
+        if (s_alarmAutoRepeats < ALARM_AUTO_REPEATS)
+        {
+            s_alarmAutoRepeats++;
+            Alarm_Snooze();
+        }
+        else
+        {
+            Alarm_Dismiss();
+        }
     }
+
+    /* 贪睡到点：再次响铃（不依赖 RTC 是否有效） */
+    if (s_alarmSnoozing && Due(s_alarmSnoozeUntil))
+    {
+        Alarm_StartRinging();
+        return;
+    }
+
     if (NetApp_GetTime(&now) != 0) return;
 
     day = (uint32_t)now.year * 10000UL + (uint32_t)now.month * 100UL + now.day;
@@ -516,15 +671,22 @@ static void Alarm_Process(void)
     s_alarmCheckMinute = nowMinute;
     s_alarmClockValid = 1;
 
-    if (due && s_alarmEnabled && !s_alarmRinging &&
+    /* 工作日模式：周一到周五（BJTime_t.wday：0=周日 … 6=周六） */
+    if (s_alarmMode == ALARM_MODE_WEEKDAYS && (now.wday == 0U || now.wday == 6U))
+        due = 0;
+
+    if (due && s_alarmMode != ALARM_MODE_OFF && !s_alarmRinging &&
         (day != s_alarmLastDay || scheduledMinute != s_alarmLastMinute))
     {
         s_alarmLastDay = day;
         s_alarmLastMinute = scheduledMinute;
-        s_alarmRinging = 1;
-        s_alarmRingStart = HAL_GetTick();
-        s_alarmEditing = 0;
-        EnterDetail(UI_PAGE_ALARM);
+        s_alarmAutoRepeats = 0;
+        if (s_alarmMode == ALARM_MODE_ONCE)
+        {
+            s_alarmMode = ALARM_MODE_OFF;       /* 仅一次：响后自动关闭并保存 */
+            Settings_Save();
+        }
+        Alarm_StartRinging();
     }
 }
 
@@ -534,15 +696,47 @@ static void Focus_Process(void)
     {
         s_focusRemaining = 0;
         s_focusState = FOCUS_FINISHED;
+        s_focusSessions++;
+        s_focusRinging = 1;
+        s_focusRingStart = HAL_GetTick();
         s_focusDirty = 1;
         if (!s_alarmRinging) EnterDetail(UI_PAGE_FOCUS);
+    }
+    else if (s_focusState == FOCUS_BREAK && Due(s_focusDeadline))
+    {
+        s_focusRemaining = 0;
+        s_focusState = FOCUS_BREAK_FINISHED;
+        s_focusRinging = 1;
+        s_focusRingStart = HAL_GetTick();
+        s_focusDirty = 1;
+        if (!s_alarmRinging) EnterDetail(UI_PAGE_FOCUS);
+    }
+
+    /* 提示音最多持续 30s，之后保持 DONE/END 状态等待用户确认 */
+    if (s_focusRinging && Due(s_focusRingStart + FOCUS_RING_MS))
+    {
+        s_focusRinging = 0;
     }
 }
 
 static void Focus_Reset(void)
 {
     s_focusState = FOCUS_IDLE;
+    s_focusRinging = 0;
     s_focusRemaining = (uint32_t)s_focusMinutes * 60UL;
+    s_focusShownSecond = 0xFFFFFFFFUL;
+    s_focusDirty = 1;
+}
+
+/* 每完成 4 轮专注给一次长休息，其余为短休息 */
+static void Focus_StartBreak(void)
+{
+    s_focusBreakMin = (s_focusSessions % FOCUS_LONG_BREAK_EVERY == 0U) ?
+                      FOCUS_LONG_BREAK_MIN : FOCUS_BREAK_MIN;
+    s_focusRemaining = (uint32_t)s_focusBreakMin * 60UL;
+    s_focusDeadline = HAL_GetTick() + s_focusRemaining * 1000UL;
+    s_focusState = FOCUS_BREAK;
+    s_focusRinging = 0;
     s_focusShownSecond = 0xFFFFFFFFUL;
     s_focusDirty = 1;
 }
@@ -571,33 +765,68 @@ static void Focus_Adjust(int8_t steps)
 static void Focus_Confirm(void)
 {
     uint32_t now = HAL_GetTick();
-    if (s_focusState == FOCUS_RUNNING)
+    BeepPattern_t feedback = BEEP_CLICK;
+
+    switch (s_focusState)
     {
+    case FOCUS_RUNNING:                     /* 暂停 */
         s_focusRemaining = Focus_RemainingSeconds();
         s_focusState = FOCUS_PAUSED;
-    }
-    else if (s_focusState == FOCUS_PAUSED)
-    {
+        feedback = BEEP_PAUSE;
+        break;
+
+    case FOCUS_PAUSED:                      /* 继续 */
         s_focusDeadline = now + s_focusRemaining * 1000UL;
         s_focusState = FOCUS_RUNNING;
-    }
-    else if (s_focusState == FOCUS_FINISHED)
-    {
+        feedback = BEEP_START;
+        break;
+
+    case FOCUS_FINISHED:                    /* 专注结束 -> 进入休息 */
+        Focus_StartBreak();
+        feedback = BEEP_OK;
+        break;
+
+    case FOCUS_BREAK:                       /* 跳过休息 */
+    case FOCUS_BREAK_FINISHED:              /* 休息结束 -> 准备下一轮 */
         Focus_Reset();
-    }
-    else
-    {
+        break;
+
+    default:                                /* 空闲 -> 开始专注，并记住时长 */
+        Settings_Save();
         s_focusDeadline = now + s_focusRemaining * 1000UL;
         s_focusState = FOCUS_RUNNING;
+        feedback = BEEP_START;
+        break;
     }
     s_focusDirty = 1;
+
+    s_focusRinging = 0;                     /* 任何确认操作都结束提示音 */
+    Reminder_UpdateBeep();
+    UiBeep(feedback);
 }
 
 /* ------------------------------ 输入处理 ------------------------------ */
+/* 结束编辑：保存设置，清除贪睡，并允许新设置在当天重新触发 */
+static void Alarm_CommitEdit(void)
+{
+    s_alarmEditing = 0;
+    s_alarmSnoozing = 0;
+    s_alarmLastDay = 0;
+    s_alarmDirty = 1;
+    Settings_Save();
+    UiBeep(BEEP_OK);
+}
+
 static uint8_t Alarm_DetailInput(int8_t step, EncoderButtonEvent ev)
 {
     if (!s_alarmEditing)
     {
+        if (ev == ENCODER_BUTTON_CONFIRM && s_alarmSnoozing)
+        {
+            Alarm_Dismiss();                /* 贪睡中点按：取消本次贪睡 */
+            UiBeep(BEEP_CLICK);
+            return 1;
+        }
         if (ev == ENCODER_BUTTON_CONFIRM)
         {
             s_alarmEditing = 1;
@@ -610,8 +839,7 @@ static uint8_t Alarm_DetailInput(int8_t step, EncoderButtonEvent ev)
 
     if (ev == ENCODER_BUTTON_BACK)
     {
-        s_alarmEditing = 0;     /* 长按只退出编辑，不穿透到页面返回 */
-        s_alarmDirty = 1;
+        Alarm_CommitEdit();     /* 长按：保存并退出编辑，不穿透到页面返回 */
         return 1;
     }
     if (step != 0)
@@ -621,28 +849,50 @@ static uint8_t Alarm_DetailInput(int8_t step, EncoderButtonEvent ev)
         else if (s_alarmField == 1)
             s_alarmMinute = (uint8_t)((s_alarmMinute + (step > 0 ? 1 : 59)) % 60U);
         else
-            s_alarmEnabled = !s_alarmEnabled;
+            s_alarmMode = (uint8_t)((s_alarmMode + (step > 0 ? 1U : (ALARM_MODE_COUNT - 1U))) % ALARM_MODE_COUNT);
         s_alarmDirty = 1;
     }
     if (ev == ENCODER_BUTTON_CONFIRM)
     {
-        if (s_alarmField < 2U) s_alarmField++;
-        else s_alarmEditing = 0;
-        s_alarmDirty = 1;
+        if (s_alarmField < 2U)
+        {
+            s_alarmField++;
+            s_alarmDirty = 1;
+        }
+        else
+        {
+            Alarm_CommitEdit();
+        }
     }
     return 1;
 }
 
 static uint8_t Focus_DetailInput(int8_t step, EncoderButtonEvent ev)
 {
-    if (ev == ENCODER_BUTTON_BACK) return 0;
+    if (ev == ENCODER_BUTTON_BACK)
+    {
+        if (s_focusState == FOCUS_PAUSED)   /* 暂停时长按：放弃本轮，回到空闲 */
+        {
+            Focus_Reset();
+            UiBeep(BEEP_CLICK);
+            return 1;
+        }
+        return 0;                           /* 其他状态：退出页面，倒计时继续在后台运行 */
+    }
     if (ev == ENCODER_BUTTON_CONFIRM)
     {
         Focus_Confirm();
     }
-    else if (step != 0 && s_focusState != FOCUS_RUNNING)
+    else if (step != 0 &&
+             (s_focusState == FOCUS_IDLE || s_focusState == FOCUS_PAUSED))
     {
-        Focus_Adjust(step);
+        /* 快速旋转时每圈累计 3 档以上，按 5 分钟一档加速调整 */
+        int16_t n = s_rotateDelta;
+        int16_t a = (n < 0) ? -n : n;
+        if (a >= 3) n = (int16_t)(n * 5);
+        if (n > 40) n = 40;
+        if (n < -40) n = -40;
+        Focus_Adjust((int8_t)n);
     }
     return 1;
 }
@@ -653,17 +903,19 @@ static void HandleInput(int8_t step, EncoderButtonEvent ev)
 
     if (s_alarmRinging)
     {
-        if (ev == ENCODER_BUTTON_CONFIRM)
+        if (ev == ENCODER_BUTTON_CONFIRM)               /* 点按：贪睡 5 分钟 */
         {
-            s_alarmRinging = 0;
-            s_alarmDirty = 1;
-            EnterDetail(s_focusState == FOCUS_FINISHED ?
+            Alarm_Snooze();
+            Reminder_UpdateBeep();
+            UiBeep(BEEP_SNOOZE);
+            EnterDetail((s_focusState == FOCUS_FINISHED || s_focusState == FOCUS_BREAK_FINISHED) ?
                         UI_PAGE_FOCUS : UI_PAGE_ALARM);
         }
-        else if (ev == ENCODER_BUTTON_BACK)
+        else if (ev == ENCODER_BUTTON_BACK)             /* 长按：关闭 */
         {
-            s_alarmRinging = 0;
-            s_alarmDirty = 1;
+            Alarm_Dismiss();
+            Reminder_UpdateBeep();
+            UiBeep(BEEP_CLICK);
             EnterMenu(UI_PAGE_ALARM);
         }
         return;
@@ -712,8 +964,20 @@ static void Refresh_StatusIcons(void)
 /* ------------------------------ 对外接口 ------------------------------ */
 void UI_Init(void)
 {
+    ReminderSettings_t saved;
+
+    Beep_Init();                /* 先让蜂鸣器引脚进入静音状态 */
     Encoder_Init();
-    NetApp_Init();
+    NetApp_Init();              /* 内部初始化 DS1302，之后才能读后备 RAM */
+
+    if (ReminderStore_Load(&saved) == 0)
+    {
+        s_alarmHour = saved.alarmHour;
+        s_alarmMinute = saved.alarmMinute;
+        s_alarmMode = saved.alarmMode;
+        s_focusMinutes = saved.focusMinutes;
+        s_focusRemaining = (uint32_t)s_focusMinutes * 60UL;
+    }
     Sht_Update();
     s_nextSht = HAL_GetTick() + SHT_PERIOD_MS;
     EnterHome();
@@ -730,13 +994,19 @@ void UI_Process(void)
     delta = Encoder_Get();
     if (delta > 0) step = 1;
     else if (delta < 0) step = -1;
+    s_rotateDelta = delta;
     ev = Encoder_GetButtonEvent();
     HandleInput(step, ev);
 
     /* ESP-AT 忙等会暂停 UI，但绝对截止时间不会丢失计时时长。 */
-    NetApp_Process();
     Alarm_Process();
     Focus_Process();
+    Reminder_UpdateBeep();
+    Beep_Process();
+
+    /* 提醒响铃期间暂停联网请求，避免阻塞导致铃声卡在某个音上；仍照常读 RTC 走时 */
+    NetApp_PauseNetwork(s_alarmRinging || s_focusRinging);
+    NetApp_Process();
 
     if (Due(s_nextSht))
     {
@@ -761,7 +1031,8 @@ void UI_Process(void)
             s_nextStatus = HAL_GetTick() + STATUS_PERIOD_MS;
         }
         else if (s_page == UI_PAGE_ALARM &&
-                 (s_alarmDirty || (s_alarmRinging && Due(s_nextClockPage))))
+                 (s_alarmDirty ||
+                  ((s_alarmRinging || s_alarmSnoozing) && Due(s_nextClockPage))))
         {
             Draw_PageAlarm();
             s_nextClockPage = HAL_GetTick() + CLOCK_PAGE_MS;

@@ -18,6 +18,7 @@ static uint8_t    s_failCnt      = 0;
 static uint8_t    s_dateDirty    = 1;     /* 日期行需要重绘                   */
 static uint8_t    s_weatherDirty = 1;     /* 天气行需要重绘                   */
 static uint8_t    s_display      = 1;     /* 1=当前页面归本模块绘制，0=暂停绘制 */
+static uint8_t    s_netPaused    = 0;     /* 1=暂停重连/校时/天气请求（提醒响铃期间使用） */
 
 static uint32_t   s_lastTick     = 0;     /* 上次读取 DS1302 的时刻           */
 static uint32_t   s_nextTime     = 0;     /* 下次联网校时时刻                 */
@@ -363,6 +364,9 @@ void NetApp_Process(void)
     if (s_dateDirty)    Draw_Date();
     if (s_weatherDirty) Draw_Weather();
 
+    /* 提醒响铃期间不发起任何会阻塞的联网请求；RTC 走时（上面）不受影响 */
+    if (s_netPaused) return;
+
     /* 2. 掉线或模块未就绪：定时重连 */
     if ((!s_espOK || !s_wifiOK) && Due(s_nextConn))
     {
@@ -443,4 +447,10 @@ void NetApp_GetStatus(NetStatus_t *st)
     st->wifiOK       = s_wifiOK;
     st->timeValid    = s_timeValid;
     st->weatherValid = s_weatherValid;
+}
+
+/* 响铃期间暂停联网：on=1 暂停，on=0 恢复（到期的任务会在恢复后立即执行） */
+void NetApp_PauseNetwork(uint8_t on)
+{
+    s_netPaused = on ? 1 : 0;
 }
