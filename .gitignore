@@ -23,6 +23,9 @@ JLinkLog.txt
 JLinkSettings.ini
 EventRecorderStub.scvd
 
+# ===== 本地私有配置（含真实凭据，绝不提交）=====
+app/net_config.h
+
 # ===== 编辑器 / 系统 =====
 .vscode/
 .idea/

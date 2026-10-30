@@ -5,8 +5,9 @@
 #include <stdint.h>
 
 /* ---------------- 用户配置 ---------------- */
-#define NET_WIFI_SSID          "REDACTED_SSID"
-#define NET_WIFI_PWD           "REDACTED_PWD"
+/* WiFi 凭据放在 net_config.h（已被 .gitignore 忽略），仓库里只有 net_config.example.h 模板。
+ * 首次编译前请执行：cp app/net_config.example.h app/net_config.h 并填入真实值。 */
+#include "net_config.h"
 
 #define NET_WIFI_RETRY         3            /* 连接 WiFi 最多尝试次数            */
 #define NET_TIME_SYNC_MS       3600000UL    /* 每 1 小时重新校时                 */
