@@ -289,7 +289,7 @@ static const Note_t kAlarm2[] = {{2000,120},{0,80},{2000,120},{0,680}};   /* 双
 
 | 位置 | 宏 | 默认 | 作用 |
 |---|---|---|---|
-| `app/net_app.h` | `NET_WIFI_SSID` / `NET_WIFI_PWD` | — | WiFi 账号密码（**见第 9 节**） |
+| `app/net_config.h` | `NET_WIFI_SSID` / `NET_WIFI_PWD` | — | WiFi 账号密码，本机私有文件（**见第 7、9 节**） |
 | `app/net_app.h` | `NET_TIME_SYNC_MS` | 3600000 | 校时间隔（1 小时） |
 | `app/net_app.h` | `NET_WEATHER_MS` | 1800000 | 天气刷新间隔（30 分钟） |
 | `app/net_app.h` | `NET_RETRY_MS` | 60000 | 失败重试间隔（60 秒） |
@@ -322,10 +322,16 @@ static const Note_t kAlarm2[] = {{2000,120},{0,80},{2000,120},{0,680}};   /* 双
 
 ## 7. 编译与烧录
 
-1. Keil MDK 打开 `MDK-ARM/ESP32.uvprojx`
-2. `F7` 编译（ARMCC V5.06，-O3），产物在 `MDK-ARM/ESP32/ESP32.hex`
-3. 仿真器设 **SWD** 模式（PB4 被 DS1302 占用，JTAG 不可用），`F8` 下载
-4. 串口助手接 PA9/PA10，**115200 8N1**，可看到启动流程和 AT 交互日志（`printf` 已重定向到 USART1）
+1. **先配置 WiFi 凭据**（仓库里只有模板，缺这一步会编译报错）：
+   ```bash
+   cp app/net_config.example.h app/net_config.h
+   # 然后编辑 app/net_config.h，填入真实 SSID 和密码
+   ```
+   `app/net_config.h` 已被 `.gitignore` 忽略，不会被提交。
+2. Keil MDK 打开 `MDK-ARM/ESP32.uvprojx`
+3. `F7` 编译（ARMCC V5.06，-O3），产物在 `MDK-ARM/ESP32/ESP32.hex`
+4. 仿真器设 **SWD** 模式（PB4 被 DS1302 占用，JTAG 不可用），`F8` 下载
+5. 串口助手接 PA9/PA10，**115200 8N1**，可看到启动流程和 AT 交互日志（`printf` 已重定向到 USART1）
 
 当前编译结果：`Code=26394  RO-data=4850  RW-data=660  ZI-data=3972`，即 ROM 31.16KB / RAM 4.52KB，0 Error / 0 Warning。增量编译时若某些文件未被重新编译，`last line of file ends without a newline` 警告会时有时无，属正常。
 
@@ -354,6 +360,7 @@ ESP32/
 │   ├── net_app.c/h          联网调度、时间天气数据、首页文本区
 │   ├── ui_app.c/h           三态导航、闹钟与专注状态机、各页绘制
 │   ├── reminder_store.c/h   闹钟/专注设置存 DS1302 后备 RAM
+│   ├── net_config.example.h WiFi 凭据模板（net_config.h 被 gitignore）
 │   └── ui_assets.c/h        6 个 40x40 图标、8x8 状态图标、16x32 数字字模
 └── MDK-ARM/                 Keil 工程与编译产物（产物已 gitignore）
 ```
@@ -366,7 +373,7 @@ ESP32/
 
 **① `interface/oled.c` 的中文注释已损坏（882 处乱码）**
 该文件在 v1.2 编辑时被错误地做过一次 GBK→UTF-8 转换，中文注释全部变成 `U+FFFD` 替换字符，在 VS Code 和 Keil 里都显示为 `���ɵ�` 之类的乱码。**代码本身是 ASCII，功能不受影响**，编译也正常。
-好消息：`b1f2077` 提交里的原始 GBK 版本是完好的，可按行比对恢复。这是当前仓库里最该修的一件事。
+好消息：`5439882` 提交里的原始 GBK 版本是完好的，可按行比对恢复。这是当前仓库里最该修的一件事。
 
 **② 联网操作阻塞主循环，界面卡住**
 `ESP32_SendCmd()` 是忙等超时（`WaitFor`），期间 `UI_Process()` 不执行。最坏情况：
@@ -376,8 +383,9 @@ ESP32/
 
 现象是「隔一段时间按键突然失灵」。已有三层缓解：绝对截止时间兜住专注计时、5 分钟补响兜住闹钟漏检、响铃期间暂停联网请求保证铃声不断。但这都是补偿，不是根治——根治方案是把 AT 交互改成状态机（发送即返回，主循环里查结果）。
 
-**③ WiFi 密码硬编码在 `app/net_app.h`，已进入 git 历史**
-公开仓库前必须处理：把 SSID/密码抽到 `app/net_config.h`（加入 `.gitignore`），仓库里只留 `net_config.example.h` 模板，再用 `git filter-repo` 清理历史。当前仓库只适合本地或私有远端。
+**③ WiFi 凭据管理（v1.5 已解决）**
+v1.0~v1.4 曾把 SSID/密码硬编码在 `app/net_app.h` 并写入 git 历史。v1.5 已抽出到 `app/net_config.h`（`.gitignore` 忽略），并用 `git filter-repo --replace-text` 把全部历史中的明文替换为 `REDACTED_SSID` / `REDACTED_PWD`。
+**注意**：所有历史提交号因此被重写。如果你的其他设备上还有旧克隆，那些副本仍带明文密码，需要重新克隆。
 
 **④ 部分源文件仍是 GBK 编码**
 `interface/oledfont.h` 仍是 GBK，其余主要源码已统一为 UTF-8。建议将剩余字库转为 UTF-8，并在 Keil 里设 `Edit → Configuration → Encoding = UTF-8`。
@@ -402,8 +410,11 @@ v1.4 已把 `Encoder_Tick1ms()` 的调用移进 `USER CODE BEGIN/END SysTick_IRQ
 
 | 版本 | 提交 | 内容 |
 |---|---|---|
-| v1.0 | `299b339` | 首个可用版本：三页界面、DS1302 走时、SNTP 校时回写、天气、SHT30、编码器交互、断网降级 |
+| v1.0 | `e7166d5` | 首个可用版本：三页界面、DS1302 走时、SNTP 校时回写、天气、SHT30、编码器交互、断网降级 |
 | v1.1 | 未单独提交 | 扩展六页 GUI，新增每日软件闹钟、全屏提醒和可后台运行的专注倒计时 |
-| v1.2 | `4efd612` | 大时间首页、六项表驱动图标菜单、动态状态图标、任意坐标位图与统一显存提交（v1.1 改动一并提交） |
-| v1.4 | `1e5faf3` | 蜂鸣器提醒（TIM2 PWM 音符表）、闹钟四模式与贪睡/自动重响/三阶段铃声、专注休息周期、设置存 DS1302 后备 RAM |
-| v1.3 | `fad907b` | 编码器改为完整正交解码 + 1ms 节拍消抖 + 旋转互锁；专注暂停时可旋转调时 |
+| v1.2 | `0d202dc` | 大时间首页、六项表驱动图标菜单、动态状态图标、任意坐标位图与统一显存提交（v1.1 改动一并提交） |
+| v1.3 | `bcf8fd8` | 编码器改为完整正交解码 + 1ms 节拍消抖 + 旋转互锁；专注暂停时可旋转调时 |
+| v1.4 | `b7faa38` | 蜂鸣器提醒（TIM2 PWM 音符表）、闹钟四模式与贪睡/自动重响/三阶段铃声、专注休息周期、设置存 DS1302 后备 RAM |
+| v1.5 | `824b046` | WiFi 凭据移出源码，改由 gitignore 的 net_config.h 提供；历史中的明文凭据已清除 |
+
+> 注：v1.5 之前的提交号在清除凭据时被整体重写，与旧文档中记录的不同。
